@@ -113,4 +113,35 @@ extension Flux2Pipeline {
         let out = adjusted * 2 - 1
         return try arrayToCGImage(out)
     }
+
+    /// Model-free pixel filter: grayscale / sepia / invert / sharpen / match-color. Optionally scoped
+    /// to `mask`. Runs at the source's native resolution and loads no models.
+    public func applyPixelFilter(
+        source: CGImage, filter: String, amount: Float = 1.0, reference: CGImage? = nil,
+        mask: CGImage? = nil, invertMask: Bool = false, maskFeather: Int = 2
+    ) throws -> CGImage {
+        let rgb01 = (try cgImageToArray(source) + 1) / 2  // (H,W,3) in [0,1]
+        let out: MLXArray
+        switch filter.lowercased() {
+        case "grayscale", "gray": out = toGrayscale(rgb01)
+        case "sepia": out = toSepia(rgb01)
+        case "invert": out = invertColor(rgb01)
+        case "sharpen": out = sharpen(rgb01, amount: amount)
+        case "match-color", "matchcolor":
+            guard let reference else {
+                throw Flux2Error.generationFailed("match-color requires a reference image")
+            }
+            out = matchColor(rgb01, reference: (try cgImageToArray(reference) + 1) / 2)
+        default:
+            throw Flux2Error.generationFailed("unknown filter: \(filter)")
+        }
+        var result = out
+        if let mask {
+            var m = try maskGridFromCGImage(mask, width: source.width, height: source.height)
+            if maskFeather > 0 { m = boxBlur(m, passes: maskFeather) }
+            if invertMask { m = 1 - m }
+            result = compositeMasked(base: rgb01, adjusted: out, mask: m)
+        }
+        return try arrayToCGImage(result * 2 - 1)
+    }
 }

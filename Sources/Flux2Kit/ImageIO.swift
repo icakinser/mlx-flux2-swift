@@ -156,15 +156,21 @@ public func loadImages(_ paths: [URL]) throws -> [CGImage] {
 
 /// PNG save helper for the CLI.
 public func savePNG(_ img: CGImage, to url: URL) throws {
-    guard
-        let destination = CGImageDestinationCreateWithURL(
-            url as CFURL, UTType.png.identifier as CFString, 1, nil)
-    else {
-        throw Flux2Error.generationFailed("Could not create PNG destination at \(url.path)")
+    try saveImage(img, to: url, format: "png")
+}
+
+/// Save a CGImage as PNG or JPEG (CoreGraphics only — no extra dependency). `format` is "png"/"jpg".
+public func saveImage(_ img: CGImage, to url: URL, format: String) throws {
+    let isJpg = format.lowercased() == "jpg" || format.lowercased() == "jpeg"
+    let type = (isJpg ? UTType.jpeg : UTType.png).identifier as CFString
+    guard let destination = CGImageDestinationCreateWithURL(url as CFURL, type, 1, nil) else {
+        throw Flux2Error.generationFailed("Could not create image destination at \(url.path)")
     }
-    CGImageDestinationAddImage(destination, img, nil)
+    let options: CFDictionary? =
+        isJpg ? [kCGImageDestinationLossyCompressionQuality: 0.92] as CFDictionary : nil
+    CGImageDestinationAddImage(destination, img, options)
     guard CGImageDestinationFinalize(destination) else {
-        throw Flux2Error.generationFailed("Could not write PNG at \(url.path)")
+        throw Flux2Error.generationFailed("Could not write image at \(url.path)")
     }
 }
 

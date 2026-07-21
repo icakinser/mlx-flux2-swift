@@ -87,6 +87,60 @@ public func rgbToHsv(_ rgb: MLXArray) -> (MLXArray, MLXArray, MLXArray) {
     return (h, s, v)
 }
 
+// MARK: - Model-free filters (rgb is (H,W,3) in [0,1])
+
+/// Per-channel mean/std over the spatial axes, shape (3,).
+private func channelStats(_ rgb: MLXArray) -> (mean: MLXArray, std: MLXArray) {
+    let m = MLX.mean(rgb, axes: [0, 1])
+    let v = MLX.mean(MLX.square(rgb - m), axes: [0, 1])
+    return (m, MLX.sqrt(v))
+}
+
+/// Reinhard color transfer: shift `source` to the per-channel mean/std of `reference`.
+public func matchColor(_ source: MLXArray, reference: MLXArray) -> MLXArray {
+    let (sm, ss) = channelStats(source)
+    let (rm, rs) = channelStats(reference)
+    let out = (source - sm) / MLX.maximum(ss, MLXArray(Float(1e-5))) * rs + rm
+    return clip(out, min: 0, max: 1)
+}
+
+/// Luminance grayscale (replicated to 3 channels).
+public func toGrayscale(_ rgb: MLXArray) -> MLXArray {
+    let r = rgb[0..., 0..., 0]
+    let g = rgb[0..., 0..., 1]
+    let b = rgb[0..., 0..., 2]
+    let lum = 0.299 * r + 0.587 * g + 0.114 * b
+    return MLX.stacked([lum, lum, lum], axis: -1)
+}
+
+/// Classic sepia tone matrix.
+public func toSepia(_ rgb: MLXArray) -> MLXArray {
+    let r = rgb[0..., 0..., 0]
+    let g = rgb[0..., 0..., 1]
+    let b = rgb[0..., 0..., 2]
+    let nr = clip(0.393 * r + 0.769 * g + 0.189 * b, min: 0, max: 1)
+    let ng = clip(0.349 * r + 0.686 * g + 0.168 * b, min: 0, max: 1)
+    let nb = clip(0.272 * r + 0.534 * g + 0.131 * b, min: 0, max: 1)
+    return MLX.stacked([nr, ng, nb], axis: -1)
+}
+
+/// Invert.
+public func invertColor(_ rgb: MLXArray) -> MLXArray { 1 - rgb }
+
+/// Per-channel box blur (reuses the 2-D `boxBlur`).
+public func blurRGB(_ rgb: MLXArray, passes: Int) -> MLXArray {
+    let r = boxBlur(rgb[0..., 0..., 0], passes: passes)
+    let g = boxBlur(rgb[0..., 0..., 1], passes: passes)
+    let b = boxBlur(rgb[0..., 0..., 2], passes: passes)
+    return MLX.stacked([r, g, b], axis: -1)
+}
+
+/// Unsharp-mask sharpen: `rgb + amount * (rgb - blur(rgb))`. `amount == 0` is identity.
+public func sharpen(_ rgb: MLXArray, amount: Float) -> MLXArray {
+    if amount == 0 { return rgb }
+    return clip(rgb + amount * (rgb - blurRGB(rgb, passes: 1)), min: 0, max: 1)
+}
+
 /// Inverse of `rgbToHsv`. h,s,v are (H,W) in [0,1]; returns (H,W,3).
 public func hsvToRgb(_ h: MLXArray, _ s: MLXArray, _ v: MLXArray) -> MLXArray {
     let h6 = h * 6

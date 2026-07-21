@@ -125,8 +125,31 @@ swift run -c release flux2kit-cli --source photo.png \
   --recolor "exp=0.3,contrast=1.1,sat=1.2,hue=0.02" --output out.png
 ```
 
+More modes and options:
+
+```sh
+# img2img — regenerate the source from a prompt at a given strength
+flux2kit-cli --img2img -p "an orange on a plate" --source in.png --strength 0.6 --output out.png
+
+# outpainting — extend the canvas and fill the new border (L,R,T,B, or one value for all sides)
+flux2kit-cli --outpaint 128 -p "wooden table, plain background" --source in.png --output out.png
+
+# generated masks — no external mask file needed (top-left origin)
+flux2kit-cli --source in.png --mask-box 176,150,170,200 --edit "a green apple" --output out.png
+flux2kit-cli --source in.png --mask-ellipse 180,160,150,180 --mask-dilate 3 --edit "…" --output out.png
+
+# model-free pixel filters (instant; masked if a mask is given)
+flux2kit-cli --source in.png --grayscale --output out.png            # also --sepia --invert --sharpen
+flux2kit-cli --source in.png --match-color ref.png --output out.png  # transfer ref's palette/tone
+
+# batch / output format
+flux2kit-cli -p "a red bicycle" --num 4 -s 100 --output out.png      # out_0.png … out_3.png
+flux2kit-cli -p "a red bicycle" --format jpg --output out.jpg
+```
+
 Editing options: `--strength F` (how freely the region regenerates), `--invert-mask`,
-`--mask-feather N` (blend the mask edge), `-s SEED`.
+`--mask-feather N`, `--mask-dilate N` / `--mask-erode N` (grow/shrink the mask), `-s SEED`.
+Pair any editing mode with `--low-memory` to run at ~1.5 GB.
 
 > **Why pixel-space color?** FLUX latents are a learned 128-dim representation, not a color space, so
 > HSV/gamma applied to latents is unreliable. `--recolor` grades in pixel space (exact). A latent

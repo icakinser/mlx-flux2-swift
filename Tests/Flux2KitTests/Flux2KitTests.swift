@@ -3,6 +3,7 @@
 // Fixtures/README.md). CPU-only: no MLX GPU ops (swift test runs without the Cmlx
 // metallib), so these cover the tokenizer/template contract, not tensors.
 
+import CoreGraphics
 import Foundation
 import MLX
 import MLXNN
@@ -62,6 +63,10 @@ private let mlxTestsEnabled = ProcessInfo.processInfo.environment["FLUX2_RUN_MLX
 // inside the scope) so the tests run standalone without the metallib.
 private func onCPU(_ body: () -> Void) {
     Device.withDefaultDevice(Device(.cpu), body)
+}
+
+private func onCPUThrows(_ body: () throws -> Void) throws {
+    try Device.withDefaultDevice(Device(.cpu), body)
 }
 
 /// The mask is tokenized with the same `prcImg` raster order as the source latent, so a mask token
@@ -207,5 +212,62 @@ private func onCPU(_ body: () -> Void) {
 
         let flat = featherRamp(10, 3, edgeStart: false, edgeEnd: false).asArray(Float.self)
         for v in flat { #expect(abs(v - 1) < 1e-6) }  // no feather at borders
+    }
+}
+
+// MARK: - More editing features
+
+/// A generated box mask is white inside the box, black outside, at the right coverage fraction.
+@Test(.enabled(if: mlxTestsEnabled)) func boxMaskCoverage() throws {
+    let img = try makeBoxMask(width: 100, height: 100, x: 20, y: 20, boxWidth: 40, boxHeight: 40)
+    try onCPUThrows {
+        let grid = try maskGridFromCGImage(img, width: 100, height: 100)  // (100,100) in [0,1]
+        MLX.eval(grid)
+        #expect(grid[40, 40].item(Float.self) > 0.5)  // inside the box
+        #expect(grid[5, 5].item(Float.self) < 0.5)  // outside
+        let mean = MLX.mean(grid).item(Float.self)
+        #expect(abs(mean - 0.16) < 0.02)  // 40*40 / 100*100
+    }
+}
+
+/// Dilation grows the white region; erosion shrinks it.
+@Test(.enabled(if: mlxTestsEnabled)) func dilateErodeChangeArea() throws {
+    let box = try makeBoxMask(width: 100, height: 100, x: 30, y: 30, boxWidth: 40, boxHeight: 40)
+    let dil = try dilateMask(box, iterations: 3)
+    let ero = try erodeMask(box, iterations: 3)
+    try onCPUThrows {
+        func mean(_ img: CGImage) throws -> Float {
+            let g = try maskGridFromCGImage(img, width: 100, height: 100)
+            return MLX.mean(g).item(Float.self)
+        }
+        let base = try mean(box)
+        #expect(try mean(dil) > base)
+        #expect(try mean(ero) < base)
+    }
+}
+
+/// Reinhard color match moves the source's per-channel mean onto the reference's.
+@Test(.enabled(if: mlxTestsEnabled)) func matchColorMovesMean() {
+    onCPU {
+        let src = MLXArray((0 ..< 12).map { Float($0) / 40 + 0.1 }, [2, 2, 3])
+        let ref = MLXArray((0 ..< 12).map { Float($0) / 40 + 0.5 }, [2, 2, 3])
+        let matched = matchColor(src, reference: ref)
+        let mm = MLX.mean(matched, axes: [0, 1]).asArray(Float.self)
+        let rm = MLX.mean(ref, axes: [0, 1]).asArray(Float.self)
+        for i in 0 ..< 3 { #expect(abs(mm[i] - rm[i]) < 1e-3) }
+    }
+}
+
+/// Sharpen at amount 0 is identity; grayscale collapses the channels.
+@Test(.enabled(if: mlxTestsEnabled)) func pixelFilterBasics() {
+    onCPU {
+        let rgb = MLXArray([0.2, 0.5, 0.8, 0.9, 0.1, 0.3].map { Float($0) }, [1, 2, 3])
+        let same = sharpen(rgb, amount: 0).asArray(Float.self)
+        let orig = rgb.asArray(Float.self)
+        for i in 0 ..< orig.count { #expect(abs(same[i] - orig[i]) < 1e-6) }
+
+        let gray = toGrayscale(rgb).asArray(Float.self)  // (1,2,3)
+        #expect(abs(gray[0] - gray[1]) < 1e-6 && abs(gray[1] - gray[2]) < 1e-6)  // pixel 0 r=g=b
+        #expect(abs(gray[3] - gray[4]) < 1e-6 && abs(gray[4] - gray[5]) < 1e-6)  // pixel 1 r=g=b
     }
 }

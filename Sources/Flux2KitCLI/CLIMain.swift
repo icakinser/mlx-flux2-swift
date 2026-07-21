@@ -33,6 +33,21 @@ private func fail(_ message: String) -> Never {
     exit(2)
 }
 
+/// Parse "a,b,c,d" into four ints.
+private func parse4(_ s: String) -> (Int, Int, Int, Int) {
+    let p = s.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+    guard p.count == 4 else { fail("expected 4 comma-separated integers, got: \(s)") }
+    return (p[0], p[1], p[2], p[3])
+}
+
+/// Parse outpaint margins: "L,R,T,B" or a single value applied to all sides.
+private func parseOutpaint(_ s: String) -> (Int, Int, Int, Int) {
+    let p = s.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+    if p.count == 1 { return (p[0], p[0], p[0], p[0]) }
+    guard p.count == 4 else { fail("--outpaint expects L,R,T,B or a single value, got: \(s)") }
+    return (p[0], p[1], p[2], p[3])
+}
+
 @main
 struct Flux2KitCLI {
     static func main() async {
@@ -77,6 +92,20 @@ struct Flux2KitCLI {
         var vaeTile: Int?
         var residency: ResidencyPolicy = .keepResident
 
+        // More editing + CLI expansion.
+        var doImg2Img = false
+        var maskBox: String?
+        var maskEllipse: String?
+        var maskDilate: Int?
+        var maskErode: Int?
+        var outpaintSpec: String?
+        var pixelFilter: String?
+        var sharpenAmount: Float = 1.0
+        var matchColorRef: String?
+        var numImages = 1
+        var seedsList: [UInt64]?
+        var format = "png"
+
         var args = Array(CommandLine.arguments.dropFirst())
         while !args.isEmpty {
             let arg = args.removeFirst()
@@ -111,6 +140,25 @@ struct Flux2KitCLI {
             case "--cache-limit": cacheLimitMB = Int(next(arg) ?? "")
             case "--memory-limit": memoryLimitMB = Int(next(arg) ?? "")
             case "--vae-tile": vaeTile = Int(next(arg) ?? "")
+            // More editing + CLI expansion.
+            case "--img2img": doImg2Img = true
+            case "--mask-box": maskBox = next(arg)
+            case "--mask-ellipse": maskEllipse = next(arg)
+            case "--mask-dilate": maskDilate = Int(next(arg) ?? "")
+            case "--mask-erode": maskErode = Int(next(arg) ?? "")
+            case "--outpaint": outpaintSpec = next(arg)
+            case "--grayscale": pixelFilter = "grayscale"
+            case "--sepia": pixelFilter = "sepia"
+            case "--invert": pixelFilter = "invert"
+            case "--sharpen": pixelFilter = "sharpen"
+            case "--sharpen-amount": sharpenAmount = Float(next(arg) ?? "") ?? sharpenAmount
+            case "--match-color": pixelFilter = "match-color"; matchColorRef = next(arg)
+            case "--num": numImages = max(1, Int(next(arg) ?? "") ?? 1)
+            case "--seeds":
+                seedsList = (next(arg) ?? "").split(separator: ",").compactMap {
+                    UInt64($0.trimmingCharacters(in: .whitespaces))
+                }
+            case "--format": format = next(arg) ?? format
             // Editing flags.
             case "--source": sourcePath = next(arg)
             case "--mask": maskPath = next(arg)
@@ -141,6 +189,22 @@ struct Flux2KitCLI {
                     --recolor "hue=..,sat=..,exp=..,contrast=..,gamma=.."
                                                    exact pixel-space grade (masked if --mask given)
                     --experimental-latent-color    with --recolor: latent-space A/B (unreliable)
+                    --img2img                      regenerate --source from -p at --strength
+                    --outpaint L,R,T,B             extend the canvas and fill the new border
+                                                   (single value applies to all sides)
+
+                  masks (any inpaint mode; no external file needed):
+                    --mask FILE | --mask-box x,y,w,h | --mask-ellipse x,y,w,h   (top-left origin)
+                    --mask-dilate N  --mask-erode N  --mask-feather N  --invert-mask
+
+                  pixel filters (model-free, instant; masked if a mask is given):
+                    --grayscale  --sepia  --invert  --sharpen [--sharpen-amount F]
+                    --match-color REF.png          transfer REF's palette/tone to --source
+
+                  batch / output:
+                    --num N            emit N variations (seeds SEED, SEED+1, …)
+                    --seeds a,b,c      explicit seed list
+                    --format png|jpg   output format
 
                   editing options: --strength F  --invert-mask  --mask-feather N  [-s SEED]
 
@@ -161,6 +225,7 @@ struct Flux2KitCLI {
 
         let editActive = doRemove || addObjectPrompt != nil || replaceBgPrompt != nil
             || editPrompt != nil || recolorSpec != nil || experimentalLatentColor
+            || doImg2Img || outpaintSpec != nil || pixelFilter != nil
 
         // --low-memory preset: int4 + staged unload + cache cap + fp16 VAE + tiled decode.
         if lowMemory {
@@ -170,6 +235,14 @@ struct Flux2KitCLI {
             if cacheLimitMB == nil { cacheLimitMB = 512 }
             if vaeTile == nil { vaeTile = 64 }
         }
+
+        // Seeds to run (multi-seed batch). Deterministic ops collapse to one below.
+        let seeds: [UInt64?]
+        if let seedsList { seeds = seedsList.map { Optional($0) } }
+        else if numImages > 1 {
+            let base = seed ?? 0
+            seeds = (0 ..< numImages).map { Optional(base + UInt64($0)) }
+        } else { seeds = [seed] }
 
         do {
             let loadStart = ProcessInfo.processInfo.systemUptime
@@ -189,96 +262,138 @@ struct Flux2KitCLI {
                 print(String(format: "[%7.1fms] Pipeline load", ms))
             }
 
-            let outputURL = URL(fileURLWithPath: output)
-
-            if editActive {
-                guard let sourcePath else { fail("editing requires --source PATH") }
-                guard let srcImg = try loadImages([URL(fileURLWithPath: sourcePath)]).first else {
+            // Load source (required by every editing operation) and derive geometry.
+            var srcImg: CGImage?
+            if let sourcePath {
+                guard let s = try loadImages([URL(fileURLWithPath: sourcePath)]).first else {
                     fail("could not load --source image")
                 }
-                if !widthSet { width = max(16, (srcImg.width / 16) * 16) }
-                if !heightSet { height = max(16, (srcImg.height / 16) * 16) }
-                let refImages = inputs.isEmpty
-                    ? nil : try loadImages(inputs.map { URL(fileURLWithPath: $0) })
-                let feather = maskFeather ?? 1
-
-                func loadMask() throws -> CGImage {
-                    guard let maskPath else { fail("this mode requires --mask PATH") }
-                    guard let m = try loadImages([URL(fileURLWithPath: maskPath)]).first else {
-                        fail("could not load --mask image")
-                    }
-                    return m
-                }
-
-                let result: CGImage
-                if let recolorSpec {
-                    let rc = parseRecolor(recolorSpec)
-                    if experimentalLatentColor {
-                        result = try pipeline.experimentalLatentColor(
-                            source: srcImg, width: width, height: height,
-                            exposure: rc.exp, contrast: rc.contrast, gamma: rc.gamma)
-                    } else {
-                        let maskImg = maskPath == nil ? nil : try loadMask()
-                        result = try pipeline.recolor(
-                            source: srcImg, mask: maskImg,
-                            hue: rc.hue, saturation: rc.sat, exposure: rc.exp,
-                            contrast: rc.contrast, gamma: rc.gamma,
-                            invertMask: invertMask, maskFeather: feather, verbose: verbose)
-                    }
-                } else if experimentalLatentColor {
-                    fail("--experimental-latent-color requires --recolor \"exp=..,contrast=..,gamma=..\"")
-                } else if doRemove {
-                    result = try pipeline.removeObject(
-                        source: srcImg, mask: try loadMask(),
-                        strength: strength ?? 0.9, width: width, height: height,
-                        numSteps: steps, guidance: guidance, seed: seed,
-                        maskFeather: feather, verbose: verbose, evalFreq: evalFreq)
-                } else if let addObjectPrompt {
-                    result = try pipeline.addObject(
-                        source: srcImg, mask: try loadMask(), prompt: addObjectPrompt,
-                        referenceImage: refImages?.first,
-                        strength: strength ?? 0.85, width: width, height: height,
-                        numSteps: steps, guidance: guidance, seed: seed,
-                        maskFeather: feather, verbose: verbose, evalFreq: evalFreq)
-                } else if let replaceBgPrompt {
-                    result = try pipeline.replaceBackground(
-                        source: srcImg, subjectMask: try loadMask(), prompt: replaceBgPrompt,
-                        strength: strength ?? 0.9, width: width, height: height,
-                        numSteps: steps, guidance: guidance, seed: seed,
-                        maskFeather: feather, verbose: verbose, evalFreq: evalFreq)
-                } else {
-                    // editPrompt
-                    result = try pipeline.editRegion(
-                        source: srcImg, mask: try loadMask(), prompt: editPrompt ?? "",
-                        strength: strength ?? 0.85, width: width, height: height,
-                        numSteps: steps, guidance: guidance, seed: seed,
-                        invertMask: invertMask, maskFeather: feather,
-                        verbose: verbose, evalFreq: evalFreq)
-                }
-
-                try savePNG(result, to: outputURL)
-                print("Saved \(outputURL.path)")
-                return
+                srcImg = s
             }
-
-            // Text-to-image (default path).
-            guard let prompt else {
-                fail("error: --prompt is required for text-to-image (see --help)")
+            if editActive {
+                guard let s = srcImg else { fail("this operation requires --source PATH") }
+                if !widthSet { width = max(16, (s.width / 16) * 16) }
+                if !heightSet { height = max(16, (s.height / 16) * 16) }
             }
             let refImages = inputs.isEmpty
                 ? nil : try loadImages(inputs.map { URL(fileURLWithPath: $0) })
-            let image = try pipeline.generate(
-                prompt: prompt,
-                width: width,
-                height: height,
-                numSteps: steps,
-                guidance: guidance,
-                seed: seed,
-                inputImages: refImages,
-                verbose: verbose,
-                evalFreq: evalFreq)
-            try savePNG(image, to: outputURL)
-            print("Saved \(outputURL.path)")
+            let feather = maskFeather ?? 1
+
+            // Resolve the edit mask from a file, a generated box/ellipse, then dilate/erode.
+            var resolvedMask: CGImage?
+            if let s = srcImg {
+                if let maskPath {
+                    resolvedMask = try loadImages([URL(fileURLWithPath: maskPath)]).first
+                } else if let spec = maskBox {
+                    let r = parse4(spec)
+                    resolvedMask = try makeBoxMask(
+                        width: s.width, height: s.height, x: r.0, y: r.1, boxWidth: r.2, boxHeight: r.3)
+                } else if let spec = maskEllipse {
+                    let r = parse4(spec)
+                    resolvedMask = try makeEllipseMask(
+                        width: s.width, height: s.height, x: r.0, y: r.1, boxWidth: r.2, boxHeight: r.3)
+                }
+                if let m = resolvedMask, let d = maskDilate {
+                    resolvedMask = try dilateMask(m, iterations: d)
+                }
+                if let m = resolvedMask, let e = maskErode {
+                    resolvedMask = try erodeMask(m, iterations: e)
+                }
+            }
+            func requireMask() -> CGImage {
+                if let resolvedMask { return resolvedMask }
+                fail("this mode requires --mask FILE, --mask-box x,y,w,h, or --mask-ellipse x,y,w,h")
+            }
+
+            func runOnce(_ curSeed: UInt64?) throws -> CGImage {
+                if editActive {
+                    guard let src = srcImg else { fail("this operation requires --source PATH") }
+                    if let pixelFilter {
+                        var ref: CGImage?
+                        if let rp = matchColorRef {
+                            ref = try loadImages([URL(fileURLWithPath: rp)]).first
+                        }
+                        return try pipeline.applyPixelFilter(
+                            source: src, filter: pixelFilter, amount: sharpenAmount, reference: ref,
+                            mask: resolvedMask, invertMask: invertMask, maskFeather: maskFeather ?? 2)
+                    }
+                    if let spec = outpaintSpec {
+                        let (l, r, t, b) = parseOutpaint(spec)
+                        return try pipeline.generateOutpaint(
+                            source: src, prompt: prompt ?? "", left: l, right: r, top: t, bottom: b,
+                            strength: strength ?? 0.95, numSteps: steps, guidance: guidance,
+                            seed: curSeed, verbose: verbose, evalFreq: evalFreq)
+                    }
+                    if doImg2Img {
+                        guard let p = prompt else { fail("--img2img requires -p PROMPT") }
+                        return try pipeline.generateImg2Img(
+                            prompt: p, source: src, strength: strength ?? 0.6,
+                            width: width, height: height, numSteps: steps, guidance: guidance,
+                            seed: curSeed, inputImages: refImages, verbose: verbose, evalFreq: evalFreq)
+                    }
+                    if let recolorSpec {
+                        let rc = parseRecolor(recolorSpec)
+                        if experimentalLatentColor {
+                            return try pipeline.experimentalLatentColor(
+                                source: src, width: width, height: height,
+                                exposure: rc.exp, contrast: rc.contrast, gamma: rc.gamma)
+                        }
+                        return try pipeline.recolor(
+                            source: src, mask: resolvedMask, hue: rc.hue, saturation: rc.sat,
+                            exposure: rc.exp, contrast: rc.contrast, gamma: rc.gamma,
+                            invertMask: invertMask, maskFeather: feather, verbose: verbose)
+                    }
+                    if experimentalLatentColor {
+                        fail("--experimental-latent-color requires --recolor \"exp=..,contrast=..,gamma=..\"")
+                    }
+                    if doRemove {
+                        return try pipeline.removeObject(
+                            source: src, mask: requireMask(), strength: strength ?? 0.9,
+                            width: width, height: height, numSteps: steps, guidance: guidance,
+                            seed: curSeed, maskFeather: feather, verbose: verbose, evalFreq: evalFreq)
+                    }
+                    if let addObjectPrompt {
+                        return try pipeline.addObject(
+                            source: src, mask: requireMask(), prompt: addObjectPrompt,
+                            referenceImage: refImages?.first, strength: strength ?? 0.85,
+                            width: width, height: height, numSteps: steps, guidance: guidance,
+                            seed: curSeed, maskFeather: feather, verbose: verbose, evalFreq: evalFreq)
+                    }
+                    if let replaceBgPrompt {
+                        return try pipeline.replaceBackground(
+                            source: src, subjectMask: requireMask(), prompt: replaceBgPrompt,
+                            strength: strength ?? 0.9, width: width, height: height, numSteps: steps,
+                            guidance: guidance, seed: curSeed, maskFeather: feather,
+                            verbose: verbose, evalFreq: evalFreq)
+                    }
+                    if let editPrompt {
+                        return try pipeline.editRegion(
+                            source: src, mask: requireMask(), prompt: editPrompt,
+                            strength: strength ?? 0.85, width: width, height: height, numSteps: steps,
+                            guidance: guidance, seed: curSeed, invertMask: invertMask,
+                            maskFeather: feather, verbose: verbose, evalFreq: evalFreq)
+                    }
+                    fail("no editing operation matched")
+                }
+                guard let p = prompt else {
+                    fail("--prompt is required for text-to-image (see --help)")
+                }
+                return try pipeline.generate(
+                    prompt: p, width: width, height: height, numSteps: steps, guidance: guidance,
+                    seed: curSeed, inputImages: refImages, verbose: verbose, evalFreq: evalFreq)
+            }
+
+            // Pixel filters / experimental-latent are deterministic → a single output.
+            let deterministic = pixelFilter != nil || experimentalLatentColor
+            let runSeeds = deterministic ? [seeds.first ?? nil] : seeds
+            let base = (output as NSString).deletingPathExtension
+            for (i, s) in runSeeds.enumerated() {
+                let img = try runOnce(s)
+                let name = runSeeds.count > 1 ? "\(base)_\(i).\(format)" : "\(base).\(format)"
+                let url = URL(fileURLWithPath: name)
+                try saveImage(img, to: url, format: format)
+                print("Saved \(url.path)")
+            }
         } catch {
             FileHandle.standardError.write(Data("error: \(error)\n".utf8))
             exit(1)
