@@ -41,6 +41,7 @@ extension Flux2Pipeline {
         guard width % 16 == 0, height % 16 == 0 else {
             throw Flux2Error.generationFailed("width and height must be divisible by 16")
         }
+        try ensureVAE()
         let resized = try resizeExactRGB(source, width: width, height: height)
         let srcArray = try cgImageToArray(resized)
         let latents = vae.encode(expandedDimensions(srcArray, axis: 0)).asType(dtype)

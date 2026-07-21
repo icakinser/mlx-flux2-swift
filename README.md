@@ -135,6 +135,38 @@ Editing options: `--strength F` (how freely the region regenerates), `--invert-m
 The same operations are available as a Swift API: `removeObject`, `addObject`, `replaceBackground`,
 `editRegion`, `recolor`, and the underlying `generateInpaint` (see `Sources/Flux2Kit/Editing.swift`).
 
+## Memory
+
+Inference is memory-bandwidth bound and the three sub-models (Qwen3 text encoder, transformer, VAE)
+run sequentially, so two levers dominate: **quantization** (fewer weight bytes to store *and* read)
+and **staged residency** (free each model once its stage is done). Both are opt-in; the default keeps
+everything resident in bf16.
+
+Measured peak RSS, 512² / 4 steps (M-series), same prompt & seed:
+
+| Config | Peak RSS | vs bf16 |
+|--------|---------:|--------:|
+| default (bf16, all resident) | ~12.6 GB | 1.0× |
+| `-q int4` | ~3.8 GB | **3.3×** |
+| `--low-memory` | ~1.65 GB | **7.6×** |
+
+```sh
+# quantize (int8 ≈ half, int4 ≈ quarter of weight memory + bandwidth)
+flux2kit-cli -p "…" -q int4 --output out.png
+
+# one-flag minimum-footprint preset: int4 + free each model after its stage +
+# fp16 VAE + tiled decode + a 512MB buffer-cache cap
+flux2kit-cli -p "…" --low-memory --output out.png
+
+# see where the memory goes, per stage
+flux2kit-cli -p "…" --low-memory --mem-report --output out.png
+```
+
+Individual knobs: `--mem-report`, `--cache-limit MB`, `--memory-limit MB`, `--vae-tile N`, `--vae-fp16`.
+The `Flux2Pipeline` init exposes `residency: .keepResident | .unloadAfterUse`, `cacheLimitMB`,
+`memoryLimitMB`, `memReport`, and `vaeTileLatent`. (Quantization skips the small `adaLN` modulation
+layers — the standard FLUX recipe — and the transformer/text-encoder big matmuls carry the savings.)
+
 ## Tests
 
 ```sh

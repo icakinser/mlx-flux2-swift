@@ -5,6 +5,7 @@
 
 import Foundation
 import MLX
+import MLXNN
 import Testing
 @testable import Flux2Kit
 
@@ -175,5 +176,36 @@ private func onCPU(_ body: () -> Void) {
         #expect(bv[1] <= bv[2] + 1e-6)
         #expect(bv[2] <= bv[3] + 1e-6)
         #expect(bv[1] > 1e-4)  // boundary actually feathered
+    }
+}
+
+// MARK: - Memory system unit tests
+
+/// The quantization filter quantizes big group-aligned Linear matmuls and skips the adaLN
+/// `[SiLU, Linear]` container (which crashes MLXNN.quantize) and dim-misaligned / non-Linear layers.
+@Test(.enabled(if: mlxTestsEnabled)) func quantFilterSelectsBigLinears() {
+    onCPU {
+        let f = flux2QuantFilter(groupSize: 64)
+        #expect(f("transformer_blocks.0.attn.to_q", Linear(64, 128)))  // aligned Linear -> yes
+        #expect(!f("last_layer.adaLN_modulation.1", Linear(3072, 6144)))  // adaLN -> no
+        #expect(!f("x.proj", Linear(10, 20)))  // dims not %64 -> no
+        #expect(!f("x.act", SiLU()))  // not a Linear -> no
+    }
+}
+
+/// The tile feather ramp is flat 1 in the middle, ramps 0→1 at interior edges, and stays flat 1 at
+/// borders (edgeStart/edgeEnd false) so image boundaries are not darkened.
+@Test(.enabled(if: mlxTestsEnabled)) func featherRampShape() {
+    onCPU {
+        let r = featherRamp(10, 3, edgeStart: true, edgeEnd: true).asArray(Float.self)
+        #expect(abs(r[5] - 1) < 1e-6)  // middle flat
+        #expect(r[0] < r[1])
+        #expect(r[1] < r[2])
+        #expect(abs(r[3] - 1) < 1e-6)  // ramp ends at 1
+        #expect(r[9] < r[8])
+        #expect(r[8] < r[7])
+
+        let flat = featherRamp(10, 3, edgeStart: false, edgeEnd: false).asArray(Float.self)
+        for v in flat { #expect(abs(v - 1) < 1e-6) }  // no feather at borders
     }
 }

@@ -37,9 +37,22 @@ public final class Flux2Pipeline {
     public let quantizeMode: String?
     public private(set) var isDistilled: Bool = false
 
-    public private(set) var model: Flux2Transformer
-    public private(set) var vae: AutoEncoder
-    public private(set) var textEncoder: Qwen3Embedder
+    // Implicitly-unwrapped so existing access sites are unchanged, but the backing storage can be
+    // freed (set to nil) between stages under `.unloadAfterUse` and lazily reloaded.
+    public private(set) var model: Flux2Transformer!
+    public private(set) var vae: AutoEncoder!
+    public private(set) var textEncoder: Qwen3Embedder!
+
+    public var residency: ResidencyPolicy
+    public let memReport: Bool
+    /// If set, VAE decode is tiled with this latent-space tile size to cap decode-stage memory.
+    public var vaeTileLatent: Int?
+
+    // Cached configs + tokenizer so any sub-model can be (re)built on demand.
+    private let fluxCfg: Flux2Config
+    private let vaeCfg: VAEConfig
+    private let qwenCfg: Qwen3Config
+    private let tokenizer: Qwen3Tokenizer
 
     private var cachedEmptyCtx: MLXArray?
 
@@ -52,7 +65,11 @@ public final class Flux2Pipeline {
         quantize: String? = nil,
         safeAttn: Bool = false,
         vaeFp16: Bool = false,
-        compile: Bool = false
+        compile: Bool = false,
+        residency: ResidencyPolicy = .keepResident,
+        cacheLimitMB: Int? = nil,
+        memoryLimitMB: Int? = nil,
+        memReport: Bool = false
     ) async throws {
         self.repoId = repoId
         self.repoPath = try resolveRepoPath(repoId, repoPath)
@@ -66,11 +83,14 @@ public final class Flux2Pipeline {
         default: throw Flux2Error.configMissing("Unsupported dtype: \(dtype)")
         }
         self.quantizeMode = quantize
+        self.residency = residency
+        self.memReport = memReport
+        applyMemoryLimits(cacheLimitMB: cacheLimitMB, memoryLimitMB: memoryLimitMB)
 
-        // --- Load models ---
+        // --- Configs + tokenizer (cheap). Heavy weights load per residency policy below. ---
 
-        let indexPath = weightsPath.appendingPathComponent("model_index.json")
-        var distilled: Bool
+        let indexPath = self.weightsPath.appendingPathComponent("model_index.json")
+        let distilled: Bool
         if let data = try? Data(contentsOf: indexPath),
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         {
@@ -78,36 +98,33 @@ public final class Flux2Pipeline {
         } else {
             distilled = !repoId.lowercased().contains("base")
         }
-
-        let fluxCfg = try loadFlux2Config(
-            weightsPath.appendingPathComponent("transformer/config.json"))
-        let vaeCfg = try loadVaeConfig(weightsPath.appendingPathComponent("vae/config.json"))
-        let qwenCfg = try loadQwen3Config(
-            weightsPath.appendingPathComponent("text_encoder/config.json"))
-
-        let model = try Flux2Transformer(params: fluxCfg)
-        model.safeAttn = safeAttn
-        self.model = model
-        self.vae = AutoEncoder(params: vaeCfg)
-
-        let tokenizer = try await Qwen3Tokenizer.fromRepo(self.repoPath)
-        self.textEncoder = Qwen3Embedder(qwenCfg, tokenizer: tokenizer, safeAttn: safeAttn)
-
         self.isDistilled = distilled
 
-        setDtype(model, self.dtype)
-        // PE dtype matches model dtype unless safe_attn keeps fp32
-        model.peEmbedder.outputDtype = safeAttn ? nil : self.dtype
-        setDtype(textEncoder.model, self.dtype)
-        if vaeFp16 {
-            vae.forceUpcast = false
-            setDtype(vae, .float16)
-        } else if vaeCfg.forceUpcast {
-            setDtype(vae, .float32)
-        } else {
-            setDtype(vae, self.dtype)
-        }
+        self.fluxCfg = try loadFlux2Config(
+            self.weightsPath.appendingPathComponent("transformer/config.json"))
+        self.vaeCfg = try loadVaeConfig(self.weightsPath.appendingPathComponent("vae/config.json"))
+        self.qwenCfg = try loadQwen3Config(
+            self.weightsPath.appendingPathComponent("text_encoder/config.json"))
+        self.tokenizer = try await Qwen3Tokenizer.fromRepo(self.repoPath)
 
+        // keepResident (default): load all three now — identical to prior behavior.
+        // unloadAfterUse: nothing heavy is resident yet; models load lazily at stage boundaries.
+        if residency == .keepResident {
+            self.textEncoder = try makeTextEncoder()
+            self.model = try makeTransformer()
+            self.vae = try makeVAE()
+        }
+        if memReport { print(memoryReportLine("after init")) }
+    }
+
+    // MARK: - Model loaders (build → dtype → weights → quantize → clearCache)
+
+    private func makeTransformer() throws -> Flux2Transformer {
+        let m = try Flux2Transformer(params: fluxCfg)
+        m.safeAttn = safeAttn
+        setDtype(m, dtype)
+        // PE dtype matches model dtype unless safe_attn keeps fp32
+        m.peEmbedder.outputDtype = safeAttn ? nil : dtype
         // Transformer weights: native single-file fast path, else diffusers conversion
         var modelWeight: URL?
         for weightFile in weightFiles {
@@ -118,7 +135,7 @@ public final class Flux2Pipeline {
             }
         }
         if let modelWeight {
-            try alignAndLoad(model, try loadSafetensors([modelWeight]), strict: true)
+            try alignAndLoad(m, try loadSafetensors([modelWeight]), strict: true)
         } else {
             let diffusersPath = weightsPath.appendingPathComponent(
                 "transformer/diffusion_pytorch_model.safetensors")
@@ -127,18 +144,38 @@ public final class Flux2Pipeline {
             }
             let raw = try loadSafetensors([diffusersPath])
             let mapped = try convertFlux2DiffusersWeights(raw, fluxCfg)
-            try alignAndLoadFromTorch(model, mapped, strict: true)
+            try alignAndLoadFromTorch(m, mapped, strict: true)
         }
+        quantizeModule(m, mode: quantizeMode)
+        MLX.Memory.clearCache()
+        return m
+    }
 
-        // VAE weights
-        let vaeWeight = weightsPath.appendingPathComponent("vae/diffusion_pytorch_model.safetensors")
+    private func makeVAE() throws -> AutoEncoder {
+        let v = AutoEncoder(params: vaeCfg)
+        if vaeFp16 {
+            v.forceUpcast = false
+            setDtype(v, .float16)
+        } else if vaeCfg.forceUpcast {
+            setDtype(v, .float32)
+        } else {
+            setDtype(v, dtype)
+        }
+        let vaeWeight = weightsPath.appendingPathComponent(
+            "vae/diffusion_pytorch_model.safetensors")
         guard FileManager.default.fileExists(atPath: vaeWeight.path) else {
             throw Flux2Error.loadFailed("Could not locate VAE weights")
         }
         let vaeRaw = try loadSafetensors([vaeWeight])
         let vaeMapped = convertVaeDiffusersWeights(vaeRaw)
-        try alignAndLoadFromTorch(vae, vaeMapped, strict: true)
+        try alignAndLoadFromTorch(v, vaeMapped, strict: true)
+        MLX.Memory.clearCache()
+        return v
+    }
 
+    private func makeTextEncoder() throws -> Qwen3Embedder {
+        let emb = Qwen3Embedder(qwenCfg, tokenizer: tokenizer, safeAttn: safeAttn)
+        setDtype(emb.model, dtype)
         // Text encoder shards — silent-overwrite merge across shards
         var teDir = weightsPath.appendingPathComponent("text_encoder")
         var shardPaths = listSafetensors(teDir)
@@ -160,13 +197,38 @@ public final class Flux2Pipeline {
             teWeights.merge(shard) { _, new in new }
         }
         teWeights = fuseQkvWeights(teWeights)
-        try alignAndLoadFromTorch(textEncoder.model, teWeights, strict: true)
+        try alignAndLoadFromTorch(emb.model, teWeights, strict: true)
+        quantizeModule(emb.model, mode: quantizeMode)
+        MLX.Memory.clearCache()
+        return emb
+    }
 
-        if let quantizeMode, quantizeMode == "int8" || quantizeMode == "int4" {
-            let bits = quantizeMode == "int8" ? 8 : 4
-            MLXNN.quantize(model: model, groupSize: 64, bits: bits)
-            MLXNN.quantize(model: textEncoder.model, groupSize: 64, bits: bits)
-        }
+    // MARK: - Ensure / unload (staged residency)
+
+    public func ensureTextEncoder() throws {
+        if textEncoder == nil { textEncoder = try makeTextEncoder() }
+    }
+    public func ensureTransformer() throws {
+        if model == nil { model = try makeTransformer() }
+    }
+    public func ensureVAE() throws {
+        if vae == nil { vae = try makeVAE() }
+    }
+
+    /// Free a stage's model — no-op under `.keepResident`.
+    public func unloadTextEncoder() {
+        if residency == .unloadAfterUse { textEncoder = nil; MLX.Memory.clearCache() }
+    }
+    public func unloadTransformer() {
+        if residency == .unloadAfterUse { model = nil; MLX.Memory.clearCache() }
+    }
+    public func unloadVAE() {
+        if residency == .unloadAfterUse { vae = nil; MLX.Memory.clearCache() }
+    }
+
+    /// Per-stage memory line when `--mem-report` is on.
+    public func reportMemory(_ stage: String) {
+        if memReport { print(memoryReportLine(stage)) }
     }
 
     // Tokenize and run the text encoder model over a batch of prompts.
@@ -252,6 +314,8 @@ public final class Flux2Pipeline {
         var timings: [String: Double] = [:]
         let totalStart = ProcessInfo.processInfo.systemUptime
 
+        try ensureTextEncoder()
+        reportMemory("pre-encode")
         var t0 = ProcessInfo.processInfo.systemUptime
         let (ctx, ctxIds, teBreakdown) = try encodePrompt(
             prompt, guidanceDistilled: guidanceDistilled, verbose: verbose)
@@ -272,6 +336,7 @@ public final class Flux2Pipeline {
         var imgCondSeq: MLXArray?
         var imgCondSeqIds: MLXArray?
         if let inputImages, !inputImages.isEmpty {
+            try ensureVAE()
             t0 = ProcessInfo.processInfo.systemUptime
             (imgCondSeq, imgCondSeqIds) = try encodeImageRefs(vae, inputImages)
             if verbose, let s = imgCondSeq, let i = imgCondSeqIds {
@@ -282,6 +347,9 @@ public final class Flux2Pipeline {
             }
         }
 
+        unloadTextEncoder()
+        try ensureTransformer()
+        reportMemory("pre-denoise")
         t0 = ProcessInfo.processInfo.systemUptime
         let batchSize = 1
         let latentChannels = model.inChannels
@@ -384,8 +452,11 @@ public final class Flux2Pipeline {
             print(String(format: "[%7.1fms] Scatter/reshape", (timings["scatter"] ?? 0) * 1000))
         }
 
+        unloadTransformer()
+        try ensureVAE()
+        reportMemory("pre-decode")
         t0 = ProcessInfo.processInfo.systemUptime
-        let decoded = vae.decode(x)
+        let decoded = decodeMaybeTiled(x)
         eval(decoded)
         timings["vae_decode"] = ProcessInfo.processInfo.systemUptime - t0
 

@@ -69,6 +69,14 @@ struct Flux2KitCLI {
         var recolorSpec: String?
         var experimentalLatentColor = false
 
+        // Memory system.
+        var lowMemory = false
+        var memReport = false
+        var cacheLimitMB: Int?
+        var memoryLimitMB: Int?
+        var vaeTile: Int?
+        var residency: ResidencyPolicy = .keepResident
+
         var args = Array(CommandLine.arguments.dropFirst())
         while !args.isEmpty {
             let arg = args.removeFirst()
@@ -97,6 +105,12 @@ struct Flux2KitCLI {
             case "--safe-attn": safeAttn = true
             case "-v", "--verbose": verbose = true
             case "--eval-freq": evalFreq = Int(next(arg) ?? "") ?? evalFreq
+            // Memory system.
+            case "--low-memory": lowMemory = true
+            case "--mem-report": memReport = true
+            case "--cache-limit": cacheLimitMB = Int(next(arg) ?? "")
+            case "--memory-limit": memoryLimitMB = Int(next(arg) ?? "")
+            case "--vae-tile": vaeTile = Int(next(arg) ?? "")
             // Editing flags.
             case "--source": sourcePath = next(arg)
             case "--mask": maskPath = next(arg)
@@ -129,6 +143,15 @@ struct Flux2KitCLI {
                     --experimental-latent-color    with --recolor: latent-space A/B (unreliable)
 
                   editing options: --strength F  --invert-mask  --mask-feather N  [-s SEED]
+
+                  memory:
+                    -q int8|int4          quantize the transformer + text encoder
+                    --low-memory          preset: int4 + free each model after its stage +
+                                          fp16 VAE + tiled decode + 512MB cache cap
+                    --mem-report          print per-stage active/cache/peak memory
+                    --cache-limit MB      cap the MLX buffer cache
+                    --memory-limit MB     soft memory limit (MLX evicts under pressure)
+                    --vae-tile N          tiled VAE decode at latent tile size N
                 """)
                 exit(0)
             default:
@@ -139,6 +162,15 @@ struct Flux2KitCLI {
         let editActive = doRemove || addObjectPrompt != nil || replaceBgPrompt != nil
             || editPrompt != nil || recolorSpec != nil || experimentalLatentColor
 
+        // --low-memory preset: int4 + staged unload + cache cap + fp16 VAE + tiled decode.
+        if lowMemory {
+            residency = .unloadAfterUse
+            if quantize == nil { quantize = "int4" }
+            vaeFp16 = true
+            if cacheLimitMB == nil { cacheLimitMB = 512 }
+            if vaeTile == nil { vaeTile = 64 }
+        }
+
         do {
             let loadStart = ProcessInfo.processInfo.systemUptime
             let pipeline = try await Flux2Pipeline(
@@ -146,7 +178,12 @@ struct Flux2KitCLI {
                 dtype: dtype,
                 quantize: quantize,
                 safeAttn: safeAttn,
-                vaeFp16: vaeFp16)
+                vaeFp16: vaeFp16,
+                residency: residency,
+                cacheLimitMB: cacheLimitMB,
+                memoryLimitMB: memoryLimitMB,
+                memReport: memReport)
+            pipeline.vaeTileLatent = vaeTile
             if verbose {
                 let ms = (ProcessInfo.processInfo.systemUptime - loadStart) * 1000
                 print(String(format: "[%7.1fms] Pipeline load", ms))

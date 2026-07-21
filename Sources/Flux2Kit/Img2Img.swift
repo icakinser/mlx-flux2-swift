@@ -45,6 +45,9 @@ extension Flux2Pipeline {
             MLXRandom.seed(seed)
         }
 
+        try ensureTextEncoder()
+        try ensureVAE()
+        reportMemory("pre-encode")
         let guidanceDistilled = isDistilled
         let (ctx, ctxIds, _) = try encodePrompt(
             prompt, guidanceDistilled: guidanceDistilled, verbose: verbose)
@@ -89,6 +92,9 @@ extension Flux2Pipeline {
         if !guidanceDistilled {
             imgInputIds = concatenated([imgInputIds, imgInputIds], axis: 0)
         }
+        unloadTextEncoder()
+        try ensureTransformer()
+        reportMemory("pre-denoise")
         let peX = model.peEmbedder(imgInputIds)
         let peCtx = model.peEmbedder(ctxIds)
 
@@ -123,7 +129,9 @@ extension Flux2Pipeline {
         x = x.transposed(0, 2, 3, 1)
         eval(x)
 
-        let decoded = vae.decode(x)
+        unloadTransformer()
+        reportMemory("pre-decode")
+        let decoded = decodeMaybeTiled(x)
         eval(decoded)
         return try arrayToCGImage(decoded[0])
     }
