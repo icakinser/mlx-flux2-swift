@@ -1,10 +1,37 @@
 // Flux2Kit — native MLX Swift port of FLUX.2 [klein], derived from scf4/mlx-flux2 (MIT).
-// Headless CLI harness for the text-to-image / image-to-image pipeline.
+// Headless CLI harness for text-to-image, image-to-image, and the editing operations.
 // Requires the MLX metallib (run via build.sh-style metallib copy or DEVELOPER_DIR xcodebuild flow).
 
 import CoreGraphics
 import Flux2Kit
 import Foundation
+
+/// Parse a `--recolor` spec like "hue=0.2,sat=1.1,exp=0.3,contrast=1.1,gamma=1.0".
+private func parseRecolor(_ s: String)
+    -> (hue: Float, sat: Float, exp: Float, contrast: Float, gamma: Float)
+{
+    var hue: Float = 0, sat: Float = 1, exp: Float = 0, contrast: Float = 1, gamma: Float = 1
+    for part in s.split(separator: ",") {
+        let kv = part.split(separator: "=")
+        guard kv.count == 2,
+            let val = Float(kv[1].trimmingCharacters(in: .whitespaces))
+        else { continue }
+        switch kv[0].trimmingCharacters(in: .whitespaces).lowercased() {
+        case "hue": hue = val
+        case "sat", "saturation": sat = val
+        case "exp", "exposure": exp = val
+        case "contrast": contrast = val
+        case "gamma": gamma = val
+        default: break
+        }
+    }
+    return (hue, sat, exp, contrast, gamma)
+}
+
+private func fail(_ message: String) -> Never {
+    FileHandle.standardError.write(Data("\(message)\n".utf8))
+    exit(2)
+}
 
 @main
 struct Flux2KitCLI {
@@ -12,6 +39,8 @@ struct Flux2KitCLI {
         var prompt: String?
         var width = defaultWidth
         var height = defaultHeight
+        var widthSet = false
+        var heightSet = false
         var steps = defaultSteps
         var guidance = Double(defaultGuidance)
         var seed: UInt64?
@@ -27,20 +56,30 @@ struct Flux2KitCLI {
         var verbose = false
         var evalFreq = 1
 
+        // Editing options.
+        var sourcePath: String?
+        var maskPath: String?
+        var strength: Double?
+        var invertMask = false
+        var maskFeather: Int?
+        var doRemove = false
+        var addObjectPrompt: String?
+        var replaceBgPrompt: String?
+        var editPrompt: String?
+        var recolorSpec: String?
+        var experimentalLatentColor = false
+
         var args = Array(CommandLine.arguments.dropFirst())
         while !args.isEmpty {
             let arg = args.removeFirst()
             func next(_ flag: String) -> String? {
-                guard !args.isEmpty else {
-                    FileHandle.standardError.write(Data("missing value for \(flag)\n".utf8))
-                    exit(2)
-                }
+                guard !args.isEmpty else { fail("missing value for \(flag)") }
                 return args.removeFirst()
             }
             switch arg {
             case "-p", "--prompt": prompt = next(arg)
-            case "-w", "--width": width = Int(next(arg) ?? "") ?? width
-            case "-h", "--height": height = Int(next(arg) ?? "") ?? height
+            case "-w", "--width": width = Int(next(arg) ?? "") ?? width; widthSet = true
+            case "-h", "--height": height = Int(next(arg) ?? "") ?? height; heightSet = true
             case "-t", "--steps": steps = Int(next(arg) ?? "") ?? steps
             case "--guidance": guidance = Double(next(arg) ?? "") ?? guidance
             case "-s", "--seed": seed = UInt64(next(arg) ?? "")
@@ -58,25 +97,47 @@ struct Flux2KitCLI {
             case "--safe-attn": safeAttn = true
             case "-v", "--verbose": verbose = true
             case "--eval-freq": evalFreq = Int(next(arg) ?? "") ?? evalFreq
+            // Editing flags.
+            case "--source": sourcePath = next(arg)
+            case "--mask": maskPath = next(arg)
+            case "--strength": strength = Double(next(arg) ?? "")
+            case "--invert-mask": invertMask = true
+            case "--mask-feather": maskFeather = Int(next(arg) ?? "")
+            case "--remove": doRemove = true
+            case "--add-object": addObjectPrompt = next(arg)
+            case "--replace-background": replaceBgPrompt = next(arg)
+            case "--edit": editPrompt = next(arg)
+            case "--recolor": recolorSpec = next(arg)
+            case "--experimental-latent-color": experimentalLatentColor = true
             case "--help":
                 print("""
-                usage: flux2kit-cli -p PROMPT [-w WIDTH] [-h HEIGHT] [-t STEPS] [--guidance G]
-                                    [-s SEED] [--output OUT.png] [--repo LOCAL_PATH]
-                                    [--input REF.png ...] [-q none|int8|int4]
-                                    [--dtype float16|bfloat16] [--vae-fp16] [--safe-attn]
-                                    [-v] [--eval-freq N]
+                usage:
+                  text-to-image:
+                    flux2kit-cli -p PROMPT [-w W] [-h H] [-t STEPS] [--guidance G] [-s SEED]
+                                 [--output OUT.png] [--repo PATH] [--input REF.png ...]
+                                 [-q none|int8|int4] [--dtype float16|bfloat16]
+                                 [--vae-fp16] [--safe-attn] [-v] [--eval-freq N]
+
+                  editing (require --source; inpaint modes also require --mask;
+                           mask convention: white = region to edit, black = keep):
+                    --remove                       remove the masked object, fill background
+                    --add-object "PROMPT"          synthesize an object in the masked region
+                    --replace-background "PROMPT"  keep masked subject, regenerate the rest
+                    --edit "PROMPT"                general masked edit (also: semantic recolor)
+                    --recolor "hue=..,sat=..,exp=..,contrast=..,gamma=.."
+                                                   exact pixel-space grade (masked if --mask given)
+                    --experimental-latent-color    with --recolor: latent-space A/B (unreliable)
+
+                  editing options: --strength F  --invert-mask  --mask-feather N  [-s SEED]
                 """)
                 exit(0)
             default:
-                FileHandle.standardError.write(Data("unknown argument: \(arg)\n".utf8))
-                exit(2)
+                fail("unknown argument: \(arg)")
             }
         }
 
-        guard let prompt else {
-            FileHandle.standardError.write(Data("error: --prompt is required (see --help)\n".utf8))
-            exit(2)
-        }
+        let editActive = doRemove || addObjectPrompt != nil || replaceBgPrompt != nil
+            || editPrompt != nil || recolorSpec != nil || experimentalLatentColor
 
         do {
             let loadStart = ProcessInfo.processInfo.systemUptime
@@ -91,10 +152,84 @@ struct Flux2KitCLI {
                 print(String(format: "[%7.1fms] Pipeline load", ms))
             }
 
-            let refImages = inputs.isEmpty
-                ? nil
-                : try loadImages(inputs.map { URL(fileURLWithPath: $0) })
+            let outputURL = URL(fileURLWithPath: output)
 
+            if editActive {
+                guard let sourcePath else { fail("editing requires --source PATH") }
+                guard let srcImg = try loadImages([URL(fileURLWithPath: sourcePath)]).first else {
+                    fail("could not load --source image")
+                }
+                if !widthSet { width = max(16, (srcImg.width / 16) * 16) }
+                if !heightSet { height = max(16, (srcImg.height / 16) * 16) }
+                let refImages = inputs.isEmpty
+                    ? nil : try loadImages(inputs.map { URL(fileURLWithPath: $0) })
+                let feather = maskFeather ?? 1
+
+                func loadMask() throws -> CGImage {
+                    guard let maskPath else { fail("this mode requires --mask PATH") }
+                    guard let m = try loadImages([URL(fileURLWithPath: maskPath)]).first else {
+                        fail("could not load --mask image")
+                    }
+                    return m
+                }
+
+                let result: CGImage
+                if let recolorSpec {
+                    let rc = parseRecolor(recolorSpec)
+                    if experimentalLatentColor {
+                        result = try pipeline.experimentalLatentColor(
+                            source: srcImg, width: width, height: height,
+                            exposure: rc.exp, contrast: rc.contrast, gamma: rc.gamma)
+                    } else {
+                        let maskImg = maskPath == nil ? nil : try loadMask()
+                        result = try pipeline.recolor(
+                            source: srcImg, mask: maskImg,
+                            hue: rc.hue, saturation: rc.sat, exposure: rc.exp,
+                            contrast: rc.contrast, gamma: rc.gamma,
+                            invertMask: invertMask, maskFeather: feather, verbose: verbose)
+                    }
+                } else if experimentalLatentColor {
+                    fail("--experimental-latent-color requires --recolor \"exp=..,contrast=..,gamma=..\"")
+                } else if doRemove {
+                    result = try pipeline.removeObject(
+                        source: srcImg, mask: try loadMask(),
+                        strength: strength ?? 0.9, width: width, height: height,
+                        numSteps: steps, guidance: guidance, seed: seed,
+                        maskFeather: feather, verbose: verbose, evalFreq: evalFreq)
+                } else if let addObjectPrompt {
+                    result = try pipeline.addObject(
+                        source: srcImg, mask: try loadMask(), prompt: addObjectPrompt,
+                        referenceImage: refImages?.first,
+                        strength: strength ?? 0.85, width: width, height: height,
+                        numSteps: steps, guidance: guidance, seed: seed,
+                        maskFeather: feather, verbose: verbose, evalFreq: evalFreq)
+                } else if let replaceBgPrompt {
+                    result = try pipeline.replaceBackground(
+                        source: srcImg, subjectMask: try loadMask(), prompt: replaceBgPrompt,
+                        strength: strength ?? 0.9, width: width, height: height,
+                        numSteps: steps, guidance: guidance, seed: seed,
+                        maskFeather: feather, verbose: verbose, evalFreq: evalFreq)
+                } else {
+                    // editPrompt
+                    result = try pipeline.editRegion(
+                        source: srcImg, mask: try loadMask(), prompt: editPrompt ?? "",
+                        strength: strength ?? 0.85, width: width, height: height,
+                        numSteps: steps, guidance: guidance, seed: seed,
+                        invertMask: invertMask, maskFeather: feather,
+                        verbose: verbose, evalFreq: evalFreq)
+                }
+
+                try savePNG(result, to: outputURL)
+                print("Saved \(outputURL.path)")
+                return
+            }
+
+            // Text-to-image (default path).
+            guard let prompt else {
+                fail("error: --prompt is required for text-to-image (see --help)")
+            }
+            let refImages = inputs.isEmpty
+                ? nil : try loadImages(inputs.map { URL(fileURLWithPath: $0) })
             let image = try pipeline.generate(
                 prompt: prompt,
                 width: width,
@@ -105,8 +240,6 @@ struct Flux2KitCLI {
                 inputImages: refImages,
                 verbose: verbose,
                 evalFreq: evalFreq)
-
-            let outputURL = URL(fileURLWithPath: output)
             try savePNG(image, to: outputURL)
             print("Saved \(outputURL.path)")
         } catch {

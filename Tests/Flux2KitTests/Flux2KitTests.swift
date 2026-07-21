@@ -4,6 +4,7 @@
 // metallib), so these cover the tokenizer/template contract, not tensors.
 
 import Foundation
+import MLX
 import Testing
 @testable import Flux2Kit
 
@@ -17,24 +18,28 @@ private var tokenizerAvailable: Bool {
         atPath: repoPath.appendingPathComponent("tokenizer/tokenizer.json").path)
 }
 
-@Test func chatTemplateMatchesReferenceRender() async throws {
+// The editing tests below exercise MLX array math, which requires the Metal shader library
+// (`default.metallib`). A plain `swift build`/`swift test` does not produce it, so those tests are
+// opt-in: set FLUX2_RUN_MLX_TESTS=1 after building through the xcodebuild/metallib flow. Without it,
+// they skip cleanly (a fresh `swift test` stays green). The tokenizer tests likewise skip unless
+// FLUX2_REPO points at a snapshot on disk.
+private let mlxTestsEnabled = ProcessInfo.processInfo.environment["FLUX2_RUN_MLX_TESTS"] != nil
+
+@Test(.enabled(if: tokenizerAvailable)) func chatTemplateMatchesReferenceRender() async throws {
     // Golden: repr of the reference Qwen3 chat template applied to 'TESTPROMPT'.
     let expected = "<|im_start|>user\nTESTPROMPT<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-    try #require(tokenizerAvailable, "FLUX-2 tokenizer not on disk; skipping")
     let tok = try await Qwen3Tokenizer.fromRepo(repoPath)
     #expect(tok.applyChatTemplate("TESTPROMPT") == expected)
 }
 
-@Test func specialTokenIdsMatchGolden() async throws {
-    try #require(tokenizerAvailable, "FLUX-2 tokenizer not on disk; skipping")
+@Test(.enabled(if: tokenizerAvailable)) func specialTokenIdsMatchGolden() async throws {
     let tok = try await Qwen3Tokenizer.fromRepo(repoPath)
     // Golden: pad_id/eos_id from the reference tokenizer.
     #expect(tok.padId == 151643)
     #expect(tok.eosId == 151645)
 }
 
-@Test func tokenIdsMatchGolden() async throws {
-    try #require(tokenizerAvailable, "FLUX-2 tokenizer not on disk; skipping")
+@Test(.enabled(if: tokenizerAvailable)) func tokenIdsMatchGolden() async throws {
     let tok = try await Qwen3Tokenizer.fromRepo(repoPath)
     // Golden: reference encode_batch(['a red bicycle'], max_length=512) unpadded prefix.
     let goldenPrefix = [
@@ -47,4 +52,128 @@ private var tokenizerAvailable: Bool {
     // The reference pads to ceil(15/64)*64 = 64 with pad_id; mirror the arithmetic (host-side check).
     let targetLen = min(512, ((ids.count + 63) / 64) * 64)
     #expect(targetLen == 64)
+}
+
+// MARK: - Editing: latent + color unit tests (CPU-only, no model weights)
+
+// These exercise MLX array math, which dispatches to Metal by default and would need the metallib
+// under `swift test`. Pin the device to CPU (ops bind their stream at creation, so build AND eval
+// inside the scope) so the tests run standalone without the metallib.
+private func onCPU(_ body: () -> Void) {
+    Device.withDefaultDevice(Device(.cpu), body)
+}
+
+/// The mask is tokenized with the same `prcImg` raster order as the source latent, so a mask token
+/// at sequence index i corresponds to source token i. This alignment is the whole basis of the blend.
+@Test(.enabled(if: mlxTestsEnabled)) func maskTokensFollowRasterOrder() {
+    onCPU {
+        let h = 3, w = 4
+        let n = h * w
+        let grid = MLXArray((0 ..< n).map { Float($0) }, [1, h, w])
+        let (tok, _) = prcImg(grid)  // (N, 1)
+        MLX.eval(tok)
+        let vals = tok.reshaped([n]).asArray(Float.self)
+        #expect(vals == (0 ..< n).map { Float($0) })
+    }
+}
+
+/// The inpaint blend is `img * editMask + keep * (1 - editMask)` with editMask `(1,N,1)`, img the
+/// CFG-doubled `(2,N,C)` batch, and keep `(1,N,C)`. Verify the broadcast keeps the edit region equal
+/// to `img` and forces the keep region to `keep` identically across both CFG halves.
+@Test(.enabled(if: mlxTestsEnabled)) func blendBroadcastsOverCfgBatch() {
+    onCPU {
+        let n = 5, c = 2
+        let editMask = MLXArray([1, 1, 0, 0, 0].map { Float($0) }, [1, n, 1])
+        let img = MLXArray((0 ..< (2 * n * c)).map { Float($0) }, [2, n, c])
+        let keep = MLXArray((0 ..< (n * c)).map { Float(100 + $0) }, [1, n, c])
+        let blended = img * editMask + keep * (1 - editMask)
+        MLX.eval(blended)
+        let arr = blended.asArray(Float.self)
+        for b in 0 ..< 2 {
+            for t in 0 ..< n {
+                for ch in 0 ..< c {
+                    let idx = ((b * n) + t) * c + ch
+                    if t < 2 {
+                        #expect(arr[idx] == Float(idx))  // edit region: untouched img value
+                    } else {
+                        #expect(arr[idx] == Float(100 + (t * c + ch)))  // keep region: broadcast
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The full step schedule is rescaled into `[strength, 0]` (no truncation), preserving monotonicity.
+@Test(.enabled(if: mlxTestsEnabled)) func scheduleRescaleIntoStrengthWindow() {
+    onCPU {
+        let full = getSchedule(4, 256)
+        #expect(full.count == 5)
+        #expect(full.first! > 0)
+        for i in 1 ..< full.count { #expect(full[i] <= full[i - 1]) }
+        let s = 0.6
+        let rescaled = full.map { $0 * s }
+        #expect(abs(rescaled.first! - full.first! * s) < 1e-12)
+        #expect(rescaled.first! < full.first!)
+        for i in 1 ..< rescaled.count { #expect(rescaled[i] <= rescaled[i - 1]) }
+    }
+}
+
+/// RGB → HSV → RGB is an identity (within float tolerance), including gray/black/white edge cases.
+@Test(.enabled(if: mlxTestsEnabled)) func hsvRoundTrip() {
+    onCPU {
+        let rgb = MLXArray(
+            [0.2, 0.5, 0.8, 0.9, 0.1, 0.3, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0].map { Float($0) }, [2, 2, 3])
+        let (h, s, v) = rgbToHsv(rgb)
+        let back = hsvToRgb(h, s, v)
+        MLX.eval(back)
+        let a = rgb.asArray(Float.self)
+        let b = back.asArray(Float.self)
+        var maxDiff: Float = 0
+        for i in 0 ..< a.count { maxDiff = max(maxDiff, abs(a[i] - b[i])) }
+        #expect(maxDiff < 1e-4)
+    }
+}
+
+/// Pixel-space curves match closed-form values and are identity at their neutral parameters.
+@Test(.enabled(if: mlxTestsEnabled)) func colorCurvesClosedForm() {
+    onCPU {
+        let x = MLXArray([0.25, 0.75, 0.25].map { Float($0) }, [1, 1, 3])
+
+        let ev = applyExposure(x, stops: 1).asArray(Float.self)  // *2, clipped
+        #expect(abs(ev[0] - 0.5) < 1e-5)
+        #expect(abs(ev[1] - 1.0) < 1e-5)
+
+        let gv = applyGamma(x, 2).asArray(Float.self)  // ^(1/2): sqrt(0.25)=0.5
+        #expect(abs(gv[0] - 0.5) < 1e-5)
+
+        let cv = applyContrast(x, 2).asArray(Float.self)  // (x-0.5)*2+0.5
+        #expect(abs(cv[0] - 0.0) < 1e-5)
+        #expect(abs(cv[1] - 1.0) < 1e-5)
+
+        let idv = adjustColor(x, exposure: 0, contrast: 1, gamma: 1, hue: 0, saturation: 1)
+            .asArray(Float.self)
+        let xv = x.asArray(Float.self)
+        for i in 0 ..< xv.count { #expect(abs(idv[i] - xv[i]) < 1e-6) }
+    }
+}
+
+/// Feathering: a uniform mask is unchanged; a step edge blurs into a monotonic ramp bounded in [0,1].
+@Test(.enabled(if: mlxTestsEnabled)) func boxBlurFeatherProperties() {
+    onCPU {
+        let ones = MLXArray([Float](repeating: 1, count: 16), [4, 4])
+        let blurredOnes = boxBlur(ones, passes: 3)
+        MLX.eval(blurredOnes)
+        for v in blurredOnes.asArray(Float.self) { #expect(abs(v - 1) < 1e-5) }
+
+        var vals = [Float](repeating: 0, count: 16)
+        for r in 0 ..< 4 { for c in 0 ..< 4 { vals[r * 4 + c] = c < 2 ? 0 : 1 } }
+        let step = MLXArray(vals, [4, 4])
+        let bv = boxBlur(step, passes: 1).asArray(Float.self)
+        for v in bv { #expect(v >= -1e-6 && v <= 1 + 1e-6) }
+        #expect(bv[0] <= bv[1] + 1e-6)
+        #expect(bv[1] <= bv[2] + 1e-6)
+        #expect(bv[2] <= bv[3] + 1e-6)
+        #expect(bv[1] > 1e-4)  // boundary actually feathered
+    }
 }

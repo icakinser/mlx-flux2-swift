@@ -94,13 +94,62 @@ let image = try pipeline.generate(
     numSteps: 4, guidance: 4.0, seed: 42)
 ```
 
+## Editing
+
+Mask-guided editing built on the same pipeline. Bring a grayscale **mask** the size of your image;
+by convention **white = the region to change, black = the region to keep** (flip with `--invert-mask`).
+One inpainting mechanism underlies removal, background replacement, region editing, and object
+addition — the model regenerates the masked region in context (lighting, shadows, perspective) while
+the rest is preserved by re-blending the source at each denoise step.
+
+```sh
+export FLUX2_REPO=/path/to/Models/FLUX-2
+
+# remove the masked object and fill with continued background
+swift run -c release flux2kit-cli --source scene.png --mask obj.png --remove -s 42 --output out.png
+
+# add an object into the masked region (optionally steer with --input ref.png)
+swift run -c release flux2kit-cli --source scene.png --mask spot.png \
+  --add-object "a red bicycle" -s 42 --output out.png
+
+# keep the masked subject, regenerate everything else
+swift run -c release flux2kit-cli --source portrait.png --mask subject.png \
+  --replace-background "sunset beach" -s 42 --output out.png
+
+# general masked edit / semantic recolor
+swift run -c release flux2kit-cli --source car.png --mask car.png \
+  --edit "make the car red" -s 42 --output out.png
+
+# exact pixel-space color grade (global, or within --mask); no model call
+swift run -c release flux2kit-cli --source photo.png \
+  --recolor "exp=0.3,contrast=1.1,sat=1.2,hue=0.02" --output out.png
+```
+
+Editing options: `--strength F` (how freely the region regenerates), `--invert-mask`,
+`--mask-feather N` (blend the mask edge), `-s SEED`.
+
+> **Why pixel-space color?** FLUX latents are a learned 128-dim representation, not a color space, so
+> HSV/gamma applied to latents is unreliable. `--recolor` grades in pixel space (exact). A latent
+> A/B path exists behind `--experimental-latent-color` (with `--recolor`) purely for comparison.
+
+The same operations are available as a Swift API: `removeObject`, `addObject`, `replaceBackground`,
+`editRegion`, `recolor`, and the underlying `generateInpaint` (see `Sources/Flux2Kit/Editing.swift`).
+
 ## Tests
 
 ```sh
+# tokenizer parity (needs a snapshot on disk)
 FLUX2_REPO=/path/to/Models/FLUX-2 swift test
+
+# also run the editing/latent/color unit tests (need the MLX metallib — see note)
+FLUX2_RUN_MLX_TESTS=1 FLUX2_REPO=/path/to/Models/FLUX-2 swift test
 ```
 
-Parity tests self-skip if `FLUX2_REPO` is unset or the tokenizer isn't on disk.
+A bare `swift test` passes with everything skipped. Tokenizer parity tests self-skip unless
+`FLUX2_REPO` points at a snapshot. The editing/color tests exercise MLX array math, which needs the
+Metal shader library (`default.metallib`) that a plain `swift build` does not produce; they are
+gated behind `FLUX2_RUN_MLX_TESTS=1` and expect the metallib to be present (build through the Xcode
+toolchain, then place `mlx.metallib` next to the test binary).
 
 ## Credits & licensing
 

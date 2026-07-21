@@ -276,7 +276,11 @@ public func denoise(
     stepTimes: Flux2StepTimes? = nil,
     txtEmbedded: MLXArray? = nil,
     guidanceEmbedded: MLXArray? = nil,
-    evalFreq: Int = 1
+    evalFreq: Int = 1,
+    // Optional per-step transform applied to the latent AFTER the step update, before eval.
+    // Defaults to nil (no-op) so the parity-locked path is unchanged. Used by inpainting to
+    // re-blend the KEEP region each step. Receives (step, tPrev, img) and returns the new img.
+    postStep: ((Int, Double, MLXArray) -> MLXArray)? = nil
 ) -> MLXArray {
     var img = img
     // model_fn defaults to the model itself
@@ -327,6 +331,7 @@ public func denoise(
         // mx.array(t_prev - t_curr, dtype=img.dtype), double→dtype in one cast
         let dt = (tPrev - tCurr).asMLXArray(dtype: img.dtype)
         img = img + dt * pred
+        if let postStep { img = postStep(step, tPrev, img) }
         if evalFreq <= 1 || (step + 1) % evalFreq == 0 || step == numSteps - 1 {
             MLX.eval(img)
         }
@@ -359,7 +364,11 @@ public func denoiseCfg(
     modelFnCfg: Flux2ModelCfgFn? = nil,
     stepTimes: Flux2StepTimes? = nil,
     txtEmbedded: MLXArray? = nil,
-    evalFreq: Int = 1
+    evalFreq: Int = 1,
+    // See denoise(): optional per-step latent transform, applied to the doubled (uncond,cond)
+    // batch after the step update. Defaults to nil (no-op). A (1,N,1) mask broadcasts over both
+    // halves of the CFG batch, so the same blend applies to uncond and cond.
+    postStep: ((Int, Double, MLXArray) -> MLXArray)? = nil
 ) -> MLXArray {
     // model_fn defaults to the model itself
     let resolvedModelFn = modelFn ?? { x, xIds, t, ctx, ctxIds, g, pX, pCtx, txtEmb, gEmb in
@@ -450,6 +459,7 @@ public func denoiseCfg(
         // Pre-cast dt to model dtype to avoid potential float64 promotion
         let dt = (tPrev - tCurr).asMLXArray(dtype: img.dtype)
         img = img + dt * pred
+        if let postStep { img = postStep(step, tPrev, img) }
         if evalFreq <= 1 || (step + 1) % evalFreq == 0 || step == numSteps - 1 {
             MLX.eval(img)
         }
