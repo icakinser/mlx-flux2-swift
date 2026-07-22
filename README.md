@@ -10,12 +10,44 @@ reference (MIT) and validated for **seed-42 parity** against it.
 > **Module name:** the SwiftPM library target is `Flux2Kit` (you `import Flux2Kit`).
 > The repository / product is `mlx-flux2-swift`, mirroring the `mlx-swift` naming convention.
 
+## Features
+
+- **Text-to-image** — FLUX.2 [klein] 4B, validated for seed-42 parity with the reference.
+- **Image-to-image** — `--img2img` at any strength, plus reference-image (kontext) conditioning.
+- **Mask-guided editing** — object removal / addition, background replacement, region edits, and
+  semantic recolor. Built-in mask generation (`--mask-box`, `--mask-ellipse`) + dilate/erode, so no
+  external mask file is required.
+- **Outpainting** — `--outpaint` extends the canvas and fills the new border in context.
+- **Model-free image toolkit** — geometry (resize/scale/crop/rotate/flip/fit-16/pixelate) and
+  color/effects (brightness, temperature, saturation, grayscale, sepia, invert, sharpen, blur,
+  posterize, threshold, vignette, auto-contrast, match-color). **Instant (~50 ms), no model load** —
+  run standalone or as post-processing.
+- **Memory system** — quantization + staged residency drop peak RAM from ~12.6 GB to ~1.65 GB
+  (`--low-memory`), all opt-in.
+- **Batch & formats** — `--num N` / `--seeds`, PNG or JPEG.
+- **Weights** — optional `--download` from Hugging Face, or bring your own.
+- **Library + sample** — use `Flux2Kit` in your own package; a runnable example lives in
+  [`Examples/Flux2KitExample`](Examples/Flux2KitExample).
+
+## Quickstart
+
+The fastest way to see it working needs **no weights and no 15 GB download** — the sample project
+applies model-free image ops:
+
+```sh
+git clone https://github.com/icakinser/mlx-flux2-swift
+cd mlx-flux2-swift/Examples/Flux2KitExample
+swift run Flux2KitExample process /path/to/any.png     # → example-processed.png
+```
+
+For generation, grab the weights (`flux2kit-cli --download`, or bring your own) and read on.
+
 ## Requirements
 
 - Apple Silicon Mac (M-series)
 - macOS 26+
 - Xcode 26 toolchain (needed to build the MLX Metal shader library — see note below)
-- A local diffusers snapshot of [`black-forest-labs/FLUX.2-klein`](https://huggingface.co/black-forest-labs/FLUX.2-klein) (Apache-2.0)
+- A FLUX.2 [klein] snapshot from [`black-forest-labs/FLUX.2-klein-4B`](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B) (Apache-2.0) — fetch it with `--download` or bring your own
 
 ## Model weights
 
@@ -205,14 +237,16 @@ Measured peak RSS, 512² / 4 steps (M-series), same prompt & seed:
 flux2kit-cli -p "…" -q int4 --output out.png
 
 # one-flag minimum-footprint preset: int4 + free each model after its stage +
-# fp16 VAE + tiled decode + a 512MB buffer-cache cap
+# fp16 VAE + a 512MB buffer-cache cap
 flux2kit-cli -p "…" --low-memory --output out.png
 
 # see where the memory goes, per stage
 flux2kit-cli -p "…" --low-memory --mem-report --output out.png
 ```
 
-Individual knobs: `--mem-report`, `--cache-limit MB`, `--memory-limit MB`, `--vae-tile N`, `--vae-fp16`.
+Individual knobs: `--mem-report`, `--cache-limit MB`, `--memory-limit MB`, `--vae-fp16`, and
+`--vae-tile N` (opt-in tiled VAE decode for very large images — lossy, since FLUX's VAE has global
+attention, so it is never auto-enabled).
 The `Flux2Pipeline` init exposes `residency: .keepResident | .unloadAfterUse`, `cacheLimitMB`,
 `memoryLimitMB`, `memReport`, and `vaeTileLatent`. (Quantization skips the small `adaLN` modulation
 layers — the standard FLUX recipe — and the transformer/text-encoder big matmuls carry the savings.)
