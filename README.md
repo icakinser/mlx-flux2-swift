@@ -149,6 +149,22 @@ swift run Flux2KitExample process /path/to/any.png          # instant, no weight
 FLUX2_REPO=/path/to/Models/FLUX-2 swift run Flux2KitExample # text-to-image
 ```
 
+## ComfyUI
+
+Custom nodes in [`ComfyUI/`](ComfyUI) wrap the CLI: **Flux2Kit Generate** (text-to-image) and
+**Flux2Kit Edit / Inpaint** (`IMAGE` + `MASK` → `IMAGE`, with edit / remove / add-object /
+replace-background modes). **Apple Silicon macOS only** — the nodes shell out to `flux2kit-cli`, so
+they need the built CLI, the metallib, and the weights.
+
+```sh
+swift build -c release                                        # build the CLI first
+ln -s "$PWD/ComfyUI" /path/to/ComfyUI/custom_nodes/flux2kit   # install
+export FLUX2_REPO=/path/to/Models/FLUX-2                      # then start ComfyUI
+```
+
+Full setup, per-node parameters, mask conventions, and troubleshooting are in
+[`ComfyUI/README.md`](ComfyUI/README.md).
+
 ## Editing
 
 Mask-guided editing built on the same pipeline. Bring a grayscale **mask** the size of your image;
