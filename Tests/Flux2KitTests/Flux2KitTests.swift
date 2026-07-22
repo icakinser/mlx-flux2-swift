@@ -272,6 +272,13 @@ private func onCPUThrows(_ body: () throws -> Void) throws {
     }
 }
 
+/// The missing-weights guidance names the download flag and the default repo.
+@Test func weightsHelpMentionsDownload() {
+    let msg = weightsHelpMessage()
+    #expect(msg.contains("--download"))
+    #expect(msg.contains(defaultRepoId))
+}
+
 /// Geometric ops produce the expected output dimensions (pure CoreGraphics, no MLX).
 @Test func imageOpsGeometry() throws {
     let img = try makeBoxMask(width: 100, height: 80, x: 10, y: 10, boxWidth: 20, boxHeight: 20)

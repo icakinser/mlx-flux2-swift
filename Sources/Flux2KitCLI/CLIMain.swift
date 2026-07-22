@@ -33,6 +33,9 @@ private func fail(_ message: String) -> Never {
     exit(2)
 }
 
+/// Sendable box for throttling download-progress prints across the async boundary.
+private final class ProgressBox: @unchecked Sendable { var last = -1 }
+
 /// Parse "a,b,c,d" into four ints.
 private func parse4(_ s: String) -> (Int, Int, Int, Int) {
     let p = s.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
@@ -113,6 +116,11 @@ struct Flux2KitCLI {
         var seedsList: [UInt64]?
         var format = "png"
 
+        // Weight download.
+        var doDownload = false
+        var downloadRepoId = defaultRepoId
+        var hfToken: String?
+
         var args = Array(CommandLine.arguments.dropFirst())
         while !args.isEmpty {
             let arg = args.removeFirst()
@@ -181,6 +189,10 @@ struct Flux2KitCLI {
                     UInt64($0.trimmingCharacters(in: .whitespaces))
                 }
             case "--format": format = next(arg) ?? format
+            // Weight download.
+            case "--download": doDownload = true
+            case "--download-repo": downloadRepoId = next(arg) ?? downloadRepoId
+            case "--hf-token": hfToken = next(arg)
             // Editing flags.
             case "--source": sourcePath = next(arg)
             case "--mask": maskPath = next(arg)
@@ -234,6 +246,12 @@ struct Flux2KitCLI {
 
                   editing options: --strength F  --invert-mask  --mask-feather N  [-s SEED]
 
+                  weights:
+                    --download            fetch the FLUX.2 [klein] snapshot from Hugging Face
+                                          (~15 GB; opt-in). Use alone to just download.
+                    --download-repo ID    override the Hub repo id
+                    --hf-token TOKEN      HF token for gated repos (or set HF_TOKEN)
+
                   memory:
                     -q int8|int4          quantize the transformer + text encoder
                     --low-memory          preset: int4 + free each model after its stage + fp16 VAE
@@ -272,6 +290,31 @@ struct Flux2KitCLI {
         if seedsList != nil && numImages > 1 {
             FileHandle.standardError.write(
                 Data("warning: --num ignored because --seeds was given\n".utf8))
+        }
+
+        // Opt-in weight download from the Hugging Face Hub.
+        if doDownload {
+            do {
+                print("Downloading \(downloadRepoId) from Hugging Face (~15 GB; this can take a while)…")
+                let tracker = ProgressBox()
+                let url = try await downloadFluxSnapshot(
+                    repoId: downloadRepoId,
+                    hfToken: hfToken ?? ProcessInfo.processInfo.environment["HF_TOKEN"]
+                ) { frac in
+                    let pct = Int(frac * 100)
+                    if pct != tracker.last, pct % 5 == 0 {
+                        tracker.last = pct
+                        FileHandle.standardError.write(Data("  \(pct)%\n".utf8))
+                    }
+                }
+                repo = url.path
+                print("Downloaded to \(url.path)")
+            } catch {
+                FileHandle.standardError.write(Data("error: \(error)\n".utf8))
+                exit(1)
+            }
+            // If download was the only request, we're done.
+            if ops.isEmpty && !diffusionActive && prompt == nil { return }
         }
 
         // MODEL-FREE FAST PATH: only geometry/color/effect ops on a source → no pipeline, no model.
@@ -438,6 +481,10 @@ struct Flux2KitCLI {
             }
         } catch {
             FileHandle.standardError.write(Data("error: \(error)\n".utf8))
+            // Point the user at how to obtain the weights when they can't be located.
+            if case Flux2Error.loadFailed = error {
+                FileHandle.standardError.write(Data("\n\(weightsHelpMessage())\n".utf8))
+            }
             exit(1)
         }
     }

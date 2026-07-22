@@ -30,7 +30,19 @@ Models/FLUX-2/
 └── tokenizer/
 ```
 
-The weights are **not** included in this repo (they are gitignored).
+The weights are **not** included in this repo (they are gitignored). Get them by either:
+
+```sh
+# let the CLI fetch them (opt-in, ~15 GB; set HF_TOKEN if the repo is license-gated)
+flux2kit-cli --download
+
+# or download yourself, then point FLUX2_REPO at the snapshot
+huggingface-cli download black-forest-labs/FLUX.2-klein-4B
+export FLUX2_REPO=/path/to/snapshot
+```
+
+Accept the model license at <https://huggingface.co/black-forest-labs/FLUX.2-klein-4B> first. If the
+weights can't be found, the CLI prints this guidance automatically.
 
 ## Build
 

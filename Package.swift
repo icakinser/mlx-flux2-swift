@@ -43,6 +43,7 @@ let package = Package(
                 .product(name: "MLXFast", package: "mlx-swift"),
                 .product(name: "MLXRandom", package: "mlx-swift"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
+                .product(name: "Hub", package: "swift-transformers"),
             ],
             path: "Sources/Flux2Kit"
         ),
