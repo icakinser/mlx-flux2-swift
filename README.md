@@ -292,4 +292,6 @@ toolchain, then place `mlx.metallib` next to the test binary).
   [`swift-transformers`](https://github.com/huggingface/swift-transformers) (Apache-2.0).
 - FLUX.2 [klein] weights: © Black Forest Labs, released under Apache-2.0.
 
-This project is MIT-licensed — see [LICENSE](LICENSE).
+This project is licensed under the **PolyForm Noncommercial License 1.0.0** — see [LICENSE](LICENSE).
+Noncommercial use only. Portions derived from `scf4/mlx-flux2` remain under the MIT License (retained
+in the LICENSE file), and the FLUX.2 weights and dependencies keep their own licenses (Apache-2.0 / MIT).
