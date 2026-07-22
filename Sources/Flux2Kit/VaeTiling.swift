@@ -1,6 +1,11 @@
 // Flux2Kit — tiled VAE decode. Caps the decode-stage activation peak for large images by decoding
 // the latent in overlapping spatial tiles and feather-blending them in pixel space. Opt-in via
 // `vaeTileLatent`; when unset (or the latent is small) decode is a single bit-identical pass.
+//
+// NOTE: tiling is a memory/quality trade, not free. FLUX's VAE mid-block uses GLOBAL attention, so a
+// tile decoded in isolation differs from the full decode (measured ~7/255 mean, visible seams at
+// small tiles). Use only when a large image would otherwise exhaust memory; larger tiles + overlap
+// reduce the artifacts. It is never auto-enabled — the caller must set `vaeTileLatent`.
 
 import Foundation
 import MLX
@@ -11,7 +16,7 @@ extension Flux2Pipeline {
     /// otherwise a single `vae.decode`.
     func decodeMaybeTiled(_ x: MLXArray) -> MLXArray {
         if let tile = vaeTileLatent, x.ndim == 4, x.dim(1) > tile || x.dim(2) > tile {
-            return decodeTiled(x, tileLatent: tile, overlap: max(1, tile / 8))
+            return decodeTiled(x, tileLatent: tile, overlap: max(2, tile / 4))
         }
         return vae.decode(x)
     }

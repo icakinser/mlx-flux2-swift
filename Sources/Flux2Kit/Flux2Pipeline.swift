@@ -237,6 +237,9 @@ public final class Flux2Pipeline {
     {
         var timings: [String: Double] = [:]
 
+        // Load the text encoder if a low-memory session freed it (safe no-op when resident).
+        try ensureTextEncoder()
+
         var t0 = ProcessInfo.processInfo.systemUptime
         let (inputIds, attentionMask) = try textEncoder.tokenize(prompts)
         if verbose { eval(inputIds, attentionMask) }

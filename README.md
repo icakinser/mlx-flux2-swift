@@ -138,9 +138,15 @@ flux2kit-cli --outpaint 128 -p "wooden table, plain background" --source in.png 
 flux2kit-cli --source in.png --mask-box 176,150,170,200 --edit "a green apple" --output out.png
 flux2kit-cli --source in.png --mask-ellipse 180,160,150,180 --mask-dilate 3 --edit "…" --output out.png
 
-# model-free pixel filters (instant; masked if a mask is given)
-flux2kit-cli --source in.png --grayscale --output out.png            # also --sepia --invert --sharpen
-flux2kit-cli --source in.png --match-color ref.png --output out.png  # transfer ref's palette/tone
+# model-free image ops — NO model load (instant, ~50 ms, ~50 MB). Run standalone on a --source,
+# or chain after a generate/edit. Applied in the order given.
+flux2kit-cli --source in.png --resize 768x512 --output out.png       # geometry: also --scale --crop
+flux2kit-cli --source in.png --rotate 90 --flip h --fit-16 --output out.png
+flux2kit-cli --source in.png --grayscale --output out.png            # effects: --sepia --invert
+flux2kit-cli --source in.png --posterize 4 --threshold 0.5 --pixelate 8 --vignette 0.5 --output out.png
+flux2kit-cli --source in.png --brightness 0.1 --temperature 0.3 --saturation 1.2 --auto-contrast --output out.png
+flux2kit-cli --source in.png --sharpen 1.5 --blur 2 --match-color ref.png --output out.png
+flux2kit-cli -p "a red bicycle" --grayscale --output out.png         # generate, then post-process
 
 # batch / output format
 flux2kit-cli -p "a red bicycle" --num 4 -s 100 --output out.png      # out_0.png … out_3.png

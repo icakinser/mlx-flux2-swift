@@ -40,6 +40,15 @@ private func parse4(_ s: String) -> (Int, Int, Int, Int) {
     return (p[0], p[1], p[2], p[3])
 }
 
+/// Parse "WxH" (e.g. "512x768") into two ints.
+private func parseWxH(_ s: String) -> (Int, Int) {
+    let p = s.lowercased().split(separator: "x").compactMap {
+        Int($0.trimmingCharacters(in: .whitespaces))
+    }
+    guard p.count == 2 else { fail("expected WxH (e.g. 512x768), got: \(s)") }
+    return (p[0], p[1])
+}
+
 /// Parse outpaint margins: "L,R,T,B" or a single value applied to all sides.
 private func parseOutpaint(_ s: String) -> (Int, Int, Int, Int) {
     let p = s.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
@@ -99,9 +108,7 @@ struct Flux2KitCLI {
         var maskDilate: Int?
         var maskErode: Int?
         var outpaintSpec: String?
-        var pixelFilter: String?
-        var sharpenAmount: Float = 1.0
-        var matchColorRef: String?
+        var ops: [ImageOp] = []  // ordered model-free image ops (geometry + color + effects)
         var numImages = 1
         var seedsList: [UInt64]?
         var format = "png"
@@ -147,12 +154,27 @@ struct Flux2KitCLI {
             case "--mask-dilate": maskDilate = Int(next(arg) ?? "")
             case "--mask-erode": maskErode = Int(next(arg) ?? "")
             case "--outpaint": outpaintSpec = next(arg)
-            case "--grayscale": pixelFilter = "grayscale"
-            case "--sepia": pixelFilter = "sepia"
-            case "--invert": pixelFilter = "invert"
-            case "--sharpen": pixelFilter = "sharpen"
-            case "--sharpen-amount": sharpenAmount = Float(next(arg) ?? "") ?? sharpenAmount
-            case "--match-color": pixelFilter = "match-color"; matchColorRef = next(arg)
+            // Model-free image ops (applied in the order given; no model load).
+            case "--resize": let r = parseWxH(next(arg) ?? ""); ops.append(.resize(r.0, r.1))
+            case "--scale": ops.append(.scale(Float(next(arg) ?? "") ?? 1))
+            case "--crop": let r = parse4(next(arg) ?? ""); ops.append(.crop(r.0, r.1, r.2, r.3))
+            case "--rotate": ops.append(.rotate(Int(next(arg) ?? "") ?? 0))
+            case "--flip": ops.append(.flip(next(arg) ?? "h"))
+            case "--fit-16": ops.append(.fit16)
+            case "--pixelate": ops.append(.pixelate(Int(next(arg) ?? "") ?? 8))
+            case "--grayscale": ops.append(.grayscale)
+            case "--sepia": ops.append(.sepia)
+            case "--invert": ops.append(.invert)
+            case "--auto-contrast": ops.append(.autoContrast)
+            case "--sharpen": ops.append(.sharpen(Float(next(arg) ?? "") ?? 1.0))
+            case "--blur": ops.append(.blur(Int(next(arg) ?? "") ?? 1))
+            case "--brightness": ops.append(.brightness(Float(next(arg) ?? "") ?? 0))
+            case "--saturation": ops.append(.saturation(Float(next(arg) ?? "") ?? 1))
+            case "--temperature": ops.append(.temperature(Float(next(arg) ?? "") ?? 0))
+            case "--posterize": ops.append(.posterize(Int(next(arg) ?? "") ?? 4))
+            case "--threshold": ops.append(.threshold(Float(next(arg) ?? "") ?? 0.5))
+            case "--vignette": ops.append(.vignette(Float(next(arg) ?? "") ?? 0.5))
+            case "--match-color": ops.append(.matchColor(next(arg) ?? ""))
             case "--num": numImages = max(1, Int(next(arg) ?? "") ?? 1)
             case "--seeds":
                 seedsList = (next(arg) ?? "").split(separator: ",").compactMap {
@@ -186,8 +208,6 @@ struct Flux2KitCLI {
                     --add-object "PROMPT"          synthesize an object in the masked region
                     --replace-background "PROMPT"  keep masked subject, regenerate the rest
                     --edit "PROMPT"                general masked edit (also: semantic recolor)
-                    --recolor "hue=..,sat=..,exp=..,contrast=..,gamma=.."
-                                                   exact pixel-space grade (masked if --mask given)
                     --experimental-latent-color    with --recolor: latent-space A/B (unreliable)
                     --img2img                      regenerate --source from -p at --strength
                     --outpaint L,R,T,B             extend the canvas and fill the new border
@@ -197,9 +217,15 @@ struct Flux2KitCLI {
                     --mask FILE | --mask-box x,y,w,h | --mask-ellipse x,y,w,h   (top-left origin)
                     --mask-dilate N  --mask-erode N  --mask-feather N  --invert-mask
 
-                  pixel filters (model-free, instant; masked if a mask is given):
-                    --grayscale  --sepia  --invert  --sharpen [--sharpen-amount F]
-                    --match-color REF.png          transfer REF's palette/tone to --source
+                  model-free image ops (NO model load — instant; applied in the order given, either
+                  standalone on --source or as post-processing after a generate/edit):
+                    geometry: --resize WxH  --scale F  --crop x,y,w,h  --rotate 90|180|270
+                              --flip h|v|hv  --fit-16  --pixelate N
+                    color:    --brightness F  --saturation F  --temperature F  --auto-contrast
+                              --recolor "hue=..,sat=..,exp=..,contrast=..,gamma=.."
+                              --match-color REF.png
+                    effects:  --grayscale  --sepia  --invert  --sharpen F  --blur N
+                              --posterize N  --threshold F  --vignette F
 
                   batch / output:
                     --num N            emit N variations (seeds SEED, SEED+1, …)
@@ -210,12 +236,11 @@ struct Flux2KitCLI {
 
                   memory:
                     -q int8|int4          quantize the transformer + text encoder
-                    --low-memory          preset: int4 + free each model after its stage +
-                                          fp16 VAE + tiled decode + 512MB cache cap
-                    --mem-report          print per-stage active/cache/peak memory
+                    --low-memory          preset: int4 + free each model after its stage + fp16 VAE
+                    --mem-report          print per-stage RSS / MLX active / peak memory
                     --cache-limit MB      cap the MLX buffer cache
                     --memory-limit MB     soft memory limit (MLX evicts under pressure)
-                    --vae-tile N          tiled VAE decode at latent tile size N
+                    --vae-tile N          tiled VAE decode at latent tile size N (lossy; large images)
                 """)
                 exit(0)
             default:
@@ -223,17 +248,49 @@ struct Flux2KitCLI {
             }
         }
 
-        let editActive = doRemove || addObjectPrompt != nil || replaceBgPrompt != nil
-            || editPrompt != nil || recolorSpec != nil || experimentalLatentColor
-            || doImg2Img || outpaintSpec != nil || pixelFilter != nil
+        let diffusionActive = doRemove || addObjectPrompt != nil || replaceBgPrompt != nil
+            || editPrompt != nil || experimentalLatentColor || doImg2Img || outpaintSpec != nil
 
-        // --low-memory preset: int4 + staged unload + cache cap + fp16 VAE + tiled decode.
+        // --low-memory preset: int4 + staged unload + fp16 VAE + cache cap. Tiling is NOT auto-
+        // enabled (it is lossy — FLUX's VAE has global attention); opt in with --vae-tile.
         if lowMemory {
             residency = .unloadAfterUse
             if quantize == nil { quantize = "int4" }
             vaeFp16 = true
             if cacheLimitMB == nil { cacheLimitMB = 512 }
-            if vaeTile == nil { vaeTile = 64 }
+        }
+
+        // Non-experimental --recolor is a model-free pixel op; fold it into the op chain.
+        if let spec = recolorSpec, !experimentalLatentColor {
+            let rc = parseRecolor(spec)
+            ops.append(
+                .recolor(hue: rc.hue, sat: rc.sat, exp: rc.exp, contrast: rc.contrast, gamma: rc.gamma))
+            recolorSpec = nil
+        }
+
+        // Warnings for ignored/conflicting flags.
+        if seedsList != nil && numImages > 1 {
+            FileHandle.standardError.write(
+                Data("warning: --num ignored because --seeds was given\n".utf8))
+        }
+
+        // MODEL-FREE FAST PATH: only geometry/color/effect ops on a source → no pipeline, no model.
+        if !ops.isEmpty && !diffusionActive && prompt == nil {
+            guard let sourcePath else { fail("image ops require --source PATH") }
+            do {
+                guard let src = try loadImages([URL(fileURLWithPath: sourcePath)]).first else {
+                    fail("could not load --source image")
+                }
+                let out = try applyImageOps(src, ops)
+                let url = URL(
+                    fileURLWithPath: "\((output as NSString).deletingPathExtension).\(format)")
+                try saveImage(out, to: url, format: format)
+                print("Saved \(url.path)")
+            } catch {
+                FileHandle.standardError.write(Data("error: \(error)\n".utf8))
+                exit(1)
+            }
+            return
         }
 
         // Seeds to run (multi-seed batch). Deterministic ops collapse to one below.
@@ -270,7 +327,7 @@ struct Flux2KitCLI {
                 }
                 srcImg = s
             }
-            if editActive {
+            if diffusionActive {
                 guard let s = srcImg else { fail("this operation requires --source PATH") }
                 if !widthSet { width = max(16, (s.width / 16) * 16) }
                 if !heightSet { height = max(16, (s.height / 16) * 16) }
@@ -306,17 +363,8 @@ struct Flux2KitCLI {
             }
 
             func runOnce(_ curSeed: UInt64?) throws -> CGImage {
-                if editActive {
+                if diffusionActive {
                     guard let src = srcImg else { fail("this operation requires --source PATH") }
-                    if let pixelFilter {
-                        var ref: CGImage?
-                        if let rp = matchColorRef {
-                            ref = try loadImages([URL(fileURLWithPath: rp)]).first
-                        }
-                        return try pipeline.applyPixelFilter(
-                            source: src, filter: pixelFilter, amount: sharpenAmount, reference: ref,
-                            mask: resolvedMask, invertMask: invertMask, maskFeather: maskFeather ?? 2)
-                    }
                     if let spec = outpaintSpec {
                         let (l, r, t, b) = parseOutpaint(spec)
                         return try pipeline.generateOutpaint(
@@ -331,20 +379,14 @@ struct Flux2KitCLI {
                             width: width, height: height, numSteps: steps, guidance: guidance,
                             seed: curSeed, inputImages: refImages, verbose: verbose, evalFreq: evalFreq)
                     }
-                    if let recolorSpec {
-                        let rc = parseRecolor(recolorSpec)
-                        if experimentalLatentColor {
-                            return try pipeline.experimentalLatentColor(
-                                source: src, width: width, height: height,
-                                exposure: rc.exp, contrast: rc.contrast, gamma: rc.gamma)
-                        }
-                        return try pipeline.recolor(
-                            source: src, mask: resolvedMask, hue: rc.hue, saturation: rc.sat,
-                            exposure: rc.exp, contrast: rc.contrast, gamma: rc.gamma,
-                            invertMask: invertMask, maskFeather: feather, verbose: verbose)
-                    }
                     if experimentalLatentColor {
-                        fail("--experimental-latent-color requires --recolor \"exp=..,contrast=..,gamma=..\"")
+                        guard let spec = recolorSpec else {
+                            fail("--experimental-latent-color requires --recolor \"exp=..,contrast=..,gamma=..\"")
+                        }
+                        let rc = parseRecolor(spec)
+                        return try pipeline.experimentalLatentColor(
+                            source: src, width: width, height: height,
+                            exposure: rc.exp, contrast: rc.contrast, gamma: rc.gamma)
                     }
                     if doRemove {
                         return try pipeline.removeObject(
@@ -383,12 +425,12 @@ struct Flux2KitCLI {
                     seed: curSeed, inputImages: refImages, verbose: verbose, evalFreq: evalFreq)
             }
 
-            // Pixel filters / experimental-latent are deterministic → a single output.
-            let deterministic = pixelFilter != nil || experimentalLatentColor
-            let runSeeds = deterministic ? [seeds.first ?? nil] : seeds
+            // experimental-latent is deterministic → a single output.
+            let runSeeds = experimentalLatentColor ? [seeds.first ?? nil] : seeds
             let base = (output as NSString).deletingPathExtension
             for (i, s) in runSeeds.enumerated() {
-                let img = try runOnce(s)
+                var img = try runOnce(s)
+                if !ops.isEmpty { img = try applyImageOps(img, ops) }  // model-free post-processing
                 let name = runSeeds.count > 1 ? "\(base)_\(i).\(format)" : "\(base).\(format)"
                 let url = URL(fileURLWithPath: name)
                 try saveImage(img, to: url, format: format)

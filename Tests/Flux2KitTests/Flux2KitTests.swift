@@ -271,3 +271,39 @@ private func onCPUThrows(_ body: () throws -> Void) throws {
         #expect(abs(gray[3] - gray[4]) < 1e-6 && abs(gray[4] - gray[5]) < 1e-6)  // pixel 1 r=g=b
     }
 }
+
+/// Geometric ops produce the expected output dimensions (pure CoreGraphics, no MLX).
+@Test func imageOpsGeometry() throws {
+    let img = try makeBoxMask(width: 100, height: 80, x: 10, y: 10, boxWidth: 20, boxHeight: 20)
+    let resized = try applyImageOps(img, [.resize(50, 60)])
+    #expect(resized.width == 50 && resized.height == 60)
+    let cropped = try applyImageOps(img, [.crop(10, 5, 40, 30)])
+    #expect(cropped.width == 40 && cropped.height == 30)
+    let rotated = try applyImageOps(img, [.rotate(90)])
+    #expect(rotated.width == 80 && rotated.height == 100)  // 90° swaps dims
+    let fit = try applyImageOps(img, [.fit16])  // 100x80 -> 96x80
+    #expect(fit.width % 16 == 0 && fit.height % 16 == 0 && fit.width == 96)
+}
+
+/// Effect filters: posterize/threshold quantize, brightness offsets, auto-contrast stretches.
+@Test(.enabled(if: mlxTestsEnabled)) func effectsBasics() {
+    onCPU {
+        let rgb = MLXArray([0.2, 0.4, 0.6, 0.8, 0.1, 0.9].map { Float($0) }, [1, 2, 3])
+        let orig = rgb.asArray(Float.self)
+
+        for v in posterize(rgb, levels: 2).asArray(Float.self) {  // -> {0,1}
+            #expect(v < 1e-6 || abs(v - 1) < 1e-6)
+        }
+        for v in threshold(rgb, 0.5).asArray(Float.self) {  // -> {0,1}
+            #expect(v < 1e-6 || abs(v - 1) < 1e-6)
+        }
+        let br = adjustBrightness(rgb, 0.1).asArray(Float.self)
+        #expect(abs(br[0] - min(1, orig[0] + 0.1)) < 1e-5)
+
+        let ac = autoContrast(rgb).asArray(Float.self)  // min 0.1 -> 0, max 0.9 -> 1
+        #expect((ac.min() ?? 1) < 1e-5 && abs((ac.max() ?? 0) - 1) < 1e-5)
+
+        let warm = adjustTemperature(rgb, 0.5).asArray(Float.self)  // red up
+        #expect(warm[0] >= orig[0] - 1e-6)
+    }
+}
