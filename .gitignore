@@ -2,6 +2,8 @@
 /.build
 Examples/**/.build/
 /Packages
+__pycache__/
+*.pyc
 xcuserdata/
 DerivedData/
 .swiftpm/configuration/registries.json

@@ -28,6 +28,8 @@ reference (MIT) and validated for **seed-42 parity** against it.
 - **Weights** — optional `--download` from Hugging Face, or bring your own.
 - **Library + sample** — use `Flux2Kit` in your own package; a runnable example lives in
   [`Examples/Flux2KitExample`](Examples/Flux2KitExample).
+- **ComfyUI nodes** — Generate and Edit/Inpaint nodes (Apple Silicon macOS only) in
+  [`ComfyUI/`](ComfyUI), wrapping the CLI.
 
 ## Quickstart
 
