@@ -94,6 +94,15 @@ let image = try pipeline.generate(
     numSteps: 4, guidance: 4.0, seed: 42)
 ```
 
+A runnable sample project lives in [`Examples/Flux2KitExample`](Examples/Flux2KitExample) — it depends
+on this package by path and shows both the model-free ops (no weights needed) and text-to-image:
+
+```sh
+cd Examples/Flux2KitExample
+swift run Flux2KitExample process /path/to/any.png          # instant, no weights
+FLUX2_REPO=/path/to/Models/FLUX-2 swift run Flux2KitExample # text-to-image
+```
+
 ## Editing
 
 Mask-guided editing built on the same pipeline. Bring a grayscale **mask** the size of your image;
