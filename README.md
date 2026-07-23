@@ -292,9 +292,8 @@ FLUX2_RUN_MLX_TESTS=1 FLUX2_REPO=/path/to/Models/FLUX-2 swift test
 
 A bare `swift test` passes with everything skipped. Tokenizer parity tests self-skip unless
 `FLUX2_REPO` points at a snapshot. The editing/color tests exercise MLX array math, which needs the
-Metal shader library (`default.metallib`) that a plain `swift build` does not produce; they are
-gated behind `FLUX2_RUN_MLX_TESTS=1` and expect the metallib to be present (build through the Xcode
-toolchain, then place `mlx.metallib` next to the test binary).
+Metal shader library; they are gated behind `FLUX2_RUN_MLX_TESTS=1`. Run **`Scripts/setup_metallib.sh`**
+once first — it stages `mlx.metallib` next to the test binary (and the CLI) automatically.
 
 ## Credits & licensing
 
