@@ -1,5 +1,6 @@
 .DS_Store
 /.build
+/.xcode-metallib
 Examples/**/.build/
 /Packages
 __pycache__/

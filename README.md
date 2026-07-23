@@ -84,14 +84,25 @@ weights can't be found, the CLI prints this guidance automatically.
 swift build -c release
 ```
 
-### MLX Metal library note
+### Getting the Metal shader library (`default.metallib`)
 
-MLX GPU ops require the compiled `default.metallib` shipped by the MLX Metal
-backend. A plain `swift build` compiles the Swift sources fine, but *running*
-GPU generation needs that metallib on the library search path. If you hit a
-Metal-not-found error at runtime, build through the Xcode toolchain (which
-bundles the metallib) or copy `default.metallib` next to the executable. The
-tokenizer/template parity tests run CPU-only and do not need it.
+MLX GPU ops need a compiled `default.metallib`, and **`swift build` does not build it** — only
+Xcode's build system compiles Metal shaders. If you hit a "failed to load the default metallib"
+error at runtime, run this **one command** (after `swift build -c release`):
+
+```sh
+Scripts/setup_metallib.sh
+```
+
+It compiles the shader library with `xcodebuild` (first run takes a few minutes), then copies it next
+to the CLI and test binaries where MLX looks for it. Run it once after cloning — again only after a
+full clean.
+
+- Requires a full **Xcode** install (not just the Command Line Tools):
+  `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`.
+- Afterward you can delete `.xcode-metallib/` to reclaim disk (the script caches a copy in `.build/`,
+  so re-runs stay instant).
+- Pure geometry ops and the tokenizer parity tests are CPU-only and don't need the metallib.
 
 ## CLI usage
 
