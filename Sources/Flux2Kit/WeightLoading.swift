@@ -356,11 +356,14 @@ public func listSafetensors(_ dirPath: URL) -> [URL] {
 // MARK: - Sharded text-encoder resolution
 
 /// Resolves the safetensors shard files in a diffusers model directory.
-/// Prefers model.safetensors.index.json (parses weight_map, dedupes + sorts shard names, verifies
+/// Prefers the supplied index json (parses weight_map, dedupes + sorts shard names, verifies
 /// each exists); falls back to the glob order (*.safetensors, then model-*.safetensors).
-public func resolveShardPaths(_ directory: URL) throws -> [URL] {
+public func resolveShardPaths(
+    _ directory: URL,
+    indexFileName: String = "model.safetensors.index.json"
+) throws -> [URL] {
     let fm = FileManager.default
-    let indexURL = directory.appendingPathComponent("model.safetensors.index.json")
+    let indexURL = directory.appendingPathComponent(indexFileName)
     if fm.fileExists(atPath: indexURL.path) {
         let data: Data
         do {

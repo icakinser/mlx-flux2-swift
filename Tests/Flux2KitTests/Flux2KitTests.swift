@@ -314,3 +314,73 @@ private func onCPUThrows(_ body: () throws -> Void) throws {
         #expect(warm[0] >= orig[0] - 1e-6)
     }
 }
+
+// MARK: - Sharded weight loading (9B diffusers snapshot)
+
+/// `resolveShardPaths` reads the supplied index json, dedupes + sorts the shard names,
+/// and verifies every referenced shard exists on disk.
+@Test func resolveShardPathsWithIndex() throws {
+    let tmp = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    // Two shards with an index that references them (unsorted, duplicates).
+    let shardA = tmp.appendingPathComponent("diffusion_pytorch_model-00002-of-00002.safetensors")
+    let shardB = tmp.appendingPathComponent("diffusion_pytorch_model-00001-of-00002.safetensors")
+    try Data().write(to: shardA)
+    try Data().write(to: shardB)
+    let index: [String: Any] = [
+        "weight_map": [
+            "a": shardB.lastPathComponent,
+            "b": shardA.lastPathComponent,
+            "c": shardA.lastPathComponent,
+        ]
+    ]
+    let indexData = try JSONSerialization.data(withJSONObject: index)
+    try indexData.write(to: tmp.appendingPathComponent("diffusion_pytorch_model.safetensors.index.json"))
+
+    let resolved = try resolveShardPaths(tmp, indexFileName: "diffusion_pytorch_model.safetensors.index.json")
+    #expect(resolved.map(\.lastPathComponent) == [shardB.lastPathComponent, shardA.lastPathComponent])
+}
+
+/// When the index json references a missing shard, `resolveShardPaths` throws immediately
+/// rather than producing a partial load.
+@Test func resolveShardPathsMissingShard() throws {
+    let tmp = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    let index: [String: Any] = [
+        "weight_map": ["a": "diffusion_pytorch_model-00001-of-00002.safetensors"]
+    ]
+    let indexData = try JSONSerialization.data(withJSONObject: index)
+    try indexData.write(to: tmp.appendingPathComponent("diffusion_pytorch_model.safetensors.index.json"))
+
+    do {
+        _ = try resolveShardPaths(tmp, indexFileName: "diffusion_pytorch_model.safetensors.index.json")
+        Issue.record("Expected resolveShardPaths to throw on missing shard")
+    } catch {
+        #expect(error is Flux2Error)
+    }
+}
+
+/// Without an index json, `resolveShardPaths` falls back to the sorted glob order
+/// (all *.safetensors, then model-*.safetensors if none found).
+@Test func resolveShardPathsFallbackGlob() throws {
+    let tmp = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    // No index — just loose files in non-alphabetical creation order.
+    let f2 = tmp.appendingPathComponent("diffusion_pytorch_model-00002-of-00002.safetensors")
+    let f1 = tmp.appendingPathComponent("diffusion_pytorch_model-00001-of-00002.safetensors")
+    try Data().write(to: f2)
+    try Data().write(to: f1)
+
+    // Without an index file, the default fallback glob is used.
+    let resolved = try resolveShardPaths(tmp)
+    #expect(resolved.map(\.lastPathComponent) == [f1.lastPathComponent, f2.lastPathComponent])
+}
