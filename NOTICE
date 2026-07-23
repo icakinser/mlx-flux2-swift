@@ -1,0 +1,45 @@
+mlx-flux2-swift
+Copyright 2026 Robert Kinser
+
+This product includes software developed by Robert Kinser
+(https://github.com/icakinser/mlx-flux2-swift).
+
+If you use, modify, or distribute this software or a derivative work, the
+Apache License 2.0 requires you to retain the attribution notices in this file,
+including the project name and the link above.
+
+--------------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------------
+
+Portions of this software are transliterated from scf4/mlx-flux2
+(https://github.com/scf4/mlx-flux2), which is distributed under the MIT License.
+The MIT copyright and permission notice is retained below as required by the MIT
+License; the MIT terms continue to apply to those upstream portions.
+
+    MIT License
+
+    Copyright (c) 2026 FLUX.2 MLX Contributors (scf4/mlx-flux2)
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+The FLUX.2 [klein] model weights are © Black Forest Labs, released separately
+under the Apache License 2.0, and are not included in or distributed with this
+software. Dependencies (mlx-swift, swift-transformers, and their transitive
+dependencies) are distributed under their own licenses (MIT / Apache-2.0).
