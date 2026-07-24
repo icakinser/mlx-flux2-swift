@@ -137,14 +137,25 @@ public final class Flux2Pipeline {
         if let modelWeight {
             try alignAndLoad(m, try loadSafetensors([modelWeight]), strict: true)
         } else {
-            let diffusersPath = weightsPath.appendingPathComponent(
-                "transformer/diffusion_pytorch_model.safetensors")
-            guard FileManager.default.fileExists(atPath: diffusersPath.path) else {
-                throw Flux2Error.loadFailed("Could not locate transformer weights in repo")
+            // Sharded diffusers format (e.g. 9B model with index json), then single file fallback
+            let diffusersDir = weightsPath.appendingPathComponent("transformer")
+            let indexPath = diffusersDir.appendingPathComponent(
+                "diffusion_pytorch_model.safetensors.index.json")
+            if FileManager.default.fileExists(atPath: indexPath.path) {
+                let shardPaths = try resolveShardPaths(diffusersDir, indexFileName: "diffusion_pytorch_model.safetensors.index.json")
+                let raw = try loadSafetensors(shardPaths)
+                let mapped = try convertFlux2DiffusersWeights(raw, fluxCfg)
+                try alignAndLoadFromTorch(m, mapped, strict: true)
+            } else {
+                let diffusersPath = diffusersDir.appendingPathComponent(
+                    "diffusion_pytorch_model.safetensors")
+                guard FileManager.default.fileExists(atPath: diffusersPath.path) else {
+                    throw Flux2Error.loadFailed("Could not locate transformer weights in repo")
+                }
+                let raw = try loadSafetensors([diffusersPath])
+                let mapped = try convertFlux2DiffusersWeights(raw, fluxCfg)
+                try alignAndLoadFromTorch(m, mapped, strict: true)
             }
-            let raw = try loadSafetensors([diffusersPath])
-            let mapped = try convertFlux2DiffusersWeights(raw, fluxCfg)
-            try alignAndLoadFromTorch(m, mapped, strict: true)
         }
         quantizeModule(m, mode: quantizeMode)
         MLX.Memory.clearCache()
