@@ -55,7 +55,9 @@ let package = Package(
         .testTarget(
             name: "Flux2KitTests",
             dependencies: ["Flux2Kit"],
-            path: "Tests/Flux2KitTests"
+            path: "Tests/Flux2KitTests",
+            // Golden reference artifacts (parity image + docs), not runtime resources.
+            exclude: ["Fixtures"]
         ),
     ]
 )

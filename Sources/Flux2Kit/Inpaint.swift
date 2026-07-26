@@ -37,10 +37,30 @@ extension Flux2Pipeline {
         verbose: Bool = false,
         evalFreq: Int = 1
     ) throws -> CGImage {
-        guard width % 16 == 0, height % 16 == 0 else {
-            throw Flux2Error.generationFailed("width and height must be divisible by 16")
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        guard width > 0, height > 0, width % 16 == 0, height % 16 == 0 else {
+            throw Flux2Error.generationFailed(
+                "width and height must be positive multiples of 16 (got \(width)x\(height))")
+        }
+        guard numSteps > 0 else {
+            throw Flux2Error.generationFailed("numSteps must be positive (got \(numSteps))")
         }
         let strength = min(max(strength, 0.0), 1.0)
+
+        // Zero strength keeps the entire image (both the edit and keep regions collapse to the
+        // source at noise level 0), so the output is just the VAE reconstruction of the source.
+        // Short-circuit to skip the transformer load and the no-op denoise loop.
+        if strength <= 0.0 {
+            try ensureVAE()
+            let vae = try requireVAE()
+            let resized = try resizeExactRGB(source, width: width, height: height)
+            let sourceArray = try cgImageToArray(resized)
+            let latents = try vae.encode(expandedDimensions(sourceArray, axis: 0)).asType(dtype)
+            let decoded = try decodeMaybeTiled(latents)
+            eval(decoded)
+            return try arrayToCGImage(decoded[0])
+        }
 
         if let seed {
             MLXRandom.seed(seed)
@@ -48,6 +68,7 @@ extension Flux2Pipeline {
 
         try ensureTextEncoder()
         try ensureVAE()
+        let vae = try requireVAE()
         reportMemory("pre-encode")
         let guidanceDistilled = isDistilled
         let (ctx, ctxIds, _) = try encodePrompt(
@@ -62,7 +83,7 @@ extension Flux2Pipeline {
         // Source latents at the output geometry (identical to img2img).
         let resized = try resizeExactRGB(source, width: width, height: height)
         let sourceArray = try cgImageToArray(resized)  // (H, W, 3) in [-1, 1]
-        let sourceLatents = vae.encode(expandedDimensions(sourceArray, axis: 0))
+        let sourceLatents = try vae.encode(expandedDimensions(sourceArray, axis: 0))
             .transposed(0, 3, 1, 2)
         let (srcTokens, xIds) = batchedPrcImg(sourceLatents.asType(dtype))
 
@@ -109,6 +130,7 @@ extension Flux2Pipeline {
         }
         unloadTextEncoder()
         try ensureTransformer()
+        let model = try requireTransformer()
         reportMemory("pre-denoise")
         let peX = model.peEmbedder(imgInputIds)
         let peCtx = model.peEmbedder(ctxIds)
@@ -135,20 +157,7 @@ extension Flux2Pipeline {
                 evalFreq: evalFreq, postStep: blend)
         }
 
-        x = concatenated(scatterIds(x, xIds), axis: 0)
-        if x.dim(2) == 1 {
-            x = x.squeezed(axis: 2)
-        } else {
-            x = x[0..., 0..., 0, 0..., 0...]
-        }
-        x = x.transposed(0, 2, 3, 1)
-        eval(x)
-
-        unloadTransformer()
-        reportMemory("pre-decode")
-        let decoded = decodeMaybeTiled(x)
-        eval(decoded)
-        return try arrayToCGImage(decoded[0])
+        return try scatterAndDecodeToImage(x, xIds: xIds)
     }
 }
 
@@ -172,18 +181,12 @@ func maskGridFromCGImage(_ img: CGImage, width w: Int, height h: Int) throws -> 
         context.interpolationQuality = .high
         context.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
     }
-    var gray = [Float](repeating: 0, count: h * w)
-    for y in 0 ..< h {
-        for x in 0 ..< w {
-            let src = y * bytesPerRow + x * 4
-            // Luminance (masks are usually grayscale; this is robust if they are not).
-            let r = Float(pixels[src])
-            let g = Float(pixels[src + 1])
-            let b = Float(pixels[src + 2])
-            gray[y * w + x] = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
-        }
-    }
-    return MLXArray(gray, [h, w])
+    // Vectorized luminance (masks are usually grayscale; this stays robust if they are not).
+    let rgba = MLXArray(pixels, [h, w, 4]).asType(.float32)  // bytesPerRow == w * 4
+    let r = rgba[0..., 0..., 0]
+    let g = rgba[0..., 0..., 1]
+    let b = rgba[0..., 0..., 2]
+    return (Float(0.299) * r + Float(0.587) * g + Float(0.114) * b) / Float(255.0)
 }
 
 /// Edge-replicating 3x3 box blur, applied `passes` times. Feathers a `(H, W)` mask so edit
@@ -213,23 +216,4 @@ func boxBlur(_ grid: MLXArray, passes: Int) -> MLXArray {
     return m
 }
 
-/// Resize a CGImage to an exact RGB size (high-quality). Mirrors the img2img resize.
-func resizeExactRGB(_ img: CGImage, width: Int, height: Int) throws -> CGImage {
-    if img.width == width && img.height == height {
-        return img
-    }
-    guard
-        let context = CGContext(
-            data: nil, width: width, height: height, bitsPerComponent: 8,
-            bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
-    else {
-        throw Flux2Error.generationFailed("Could not create resize context")
-    }
-    context.interpolationQuality = .high
-    context.draw(img, in: CGRect(x: 0, y: 0, width: width, height: height))
-    guard let resized = context.makeImage() else {
-        throw Flux2Error.generationFailed("resize failed")
-    }
-    return resized
-}
+// (resizeExactRGB now lives in ImageIO.swift as the single canonical resize.)

@@ -6,13 +6,33 @@ import CoreGraphics
 import Foundation
 import MLX
 
+/// Axis (or axes) to mirror across in a flip op.
+public enum FlipMode: String, Sendable, CaseIterable {
+    case horizontal = "h"
+    case vertical = "v"
+    case both = "hv"
+
+    /// Parse a user-supplied flip spec ("h"/"v"/"hv" and long forms). Returns nil on anything else.
+    public init?(parsing raw: String) {
+        switch raw.lowercased() {
+        case "h", "horizontal": self = .horizontal
+        case "v", "vertical": self = .vertical
+        case "hv", "vh", "both": self = .both
+        default: return nil
+        }
+    }
+
+    var flipsHorizontally: Bool { self == .horizontal || self == .both }
+    var flipsVertically: Bool { self == .vertical || self == .both }
+}
+
 /// A single model-free operation. `applyImageOps` runs a list in order.
 public enum ImageOp {
     case resize(Int, Int)
     case scale(Float)
     case crop(Int, Int, Int, Int)
     case rotate(Int)  // 90 / 180 / 270 (clockwise)
-    case flip(String)  // "h" / "v" / "hv"
+    case flip(FlipMode)
     case fit16  // center-crop to a multiple of 16
     case pixelate(Int)
     case grayscale
@@ -32,37 +52,72 @@ public enum ImageOp {
 }
 
 /// Apply model-free ops to a CGImage in order. No model, no VAE — pure CoreGraphics + elementwise MLX.
+///
+/// Consecutive elementwise (MLX) ops are fused: the working image is held as an rgb01 `MLXArray` and
+/// only round-tripped through `CGImage` when a geometric op needs CoreGraphics, or at the very end.
+/// This avoids a `cgImageToArray`/`arrayToCGImage` pair (and a full-frame uint8 re-quantization) per
+/// op. To preserve the previous path's clamp semantics, the fused value is clipped to `[0,1]` between
+/// ops (matching the old `arrayToCGImage` clip); the only intentional difference is that lossy uint8
+/// re-quantization no longer happens between fused ops (a precision improvement, not a change in
+/// intent — these ops are model-free creative effects, not parity-locked).
 public func applyImageOps(_ source: CGImage, _ ops: [ImageOp]) throws -> CGImage {
     var img = source
+    var pending: MLXArray? = nil  // rgb01 in [0,1], shape (H, W, 3), when a fused run is in flight
+
+    func loadPending() throws -> MLXArray {
+        if let p = pending { return p }
+        return (try cgImageToArray(img) + 1) / 2
+    }
+    func flush() throws {
+        if let p = pending {
+            img = try arrayToCGImage(p * 2 - 1)
+            pending = nil
+        }
+    }
+    func fuse(_ f: (MLXArray) -> MLXArray) throws {
+        pending = clip(f(try loadPending()), min: 0.0, max: 1.0)
+    }
+
     for op in ops {
         switch op {
         case .resize(let w, let h):
+            try flush()
             img = try resizeExactRGB(img, width: max(1, w), height: max(1, h))
         case .scale(let f):
+            try flush()
             img = try resizeExactRGB(
                 img, width: max(1, Int(Float(img.width) * f)),
                 height: max(1, Int(Float(img.height) * f)))
         case .crop(let x, let y, let w, let h):
+            try flush()
             img = try cropImage(img, x: x, y: y, width: w, height: h)
-        case .rotate(let d): img = try rotateImage(img, degrees: d)
-        case .flip(let m): img = try flipImage(img, mode: m)
-        case .fit16: img = try centerCropToMultiple(img, 16)
-        case .pixelate(let b): img = try pixelateImage(img, block: b)
-        case .grayscale: img = try mapRGB(img) { toGrayscale($0) }
-        case .sepia: img = try mapRGB(img) { toSepia($0) }
-        case .invert: img = try mapRGB(img) { invertColor($0) }
-        case .autoContrast: img = try mapRGB(img) { autoContrast($0) }
-        case .sharpen(let a): img = try mapRGB(img) { sharpen($0, amount: a) }
-        case .blur(let p): img = try mapRGB(img) { blurRGB($0, passes: p) }
-        case .brightness(let b): img = try mapRGB(img) { adjustBrightness($0, b) }
+        case .rotate(let d):
+            try flush()
+            img = try rotateImage(img, degrees: d)
+        case .flip(let m):
+            try flush()
+            img = try flipImage(img, mode: m)
+        case .fit16:
+            try flush()
+            img = try centerCropToMultiple(img, 16)
+        case .pixelate(let b):
+            try flush()
+            img = try pixelateImage(img, block: b)
+        case .grayscale: try fuse { toGrayscale($0) }
+        case .sepia: try fuse { toSepia($0) }
+        case .invert: try fuse { invertColor($0) }
+        case .autoContrast: try fuse { autoContrast($0) }
+        case .sharpen(let a): try fuse { sharpen($0, amount: a) }
+        case .blur(let p): try fuse { blurRGB($0, passes: p) }
+        case .brightness(let b): try fuse { adjustBrightness($0, b) }
         case .saturation(let s):
-            img = try mapRGB(img) { applyHueSaturation($0, hue: 0, saturation: s) }
-        case .temperature(let t): img = try mapRGB(img) { adjustTemperature($0, t) }
-        case .posterize(let n): img = try mapRGB(img) { posterize($0, levels: n) }
-        case .threshold(let t): img = try mapRGB(img) { threshold($0, t) }
-        case .vignette(let a): img = try mapRGB(img) { vignette($0, amount: a) }
+            try fuse { applyHueSaturation($0, hue: 0, saturation: s) }
+        case .temperature(let t): try fuse { adjustTemperature($0, t) }
+        case .posterize(let n): try fuse { posterize($0, levels: n) }
+        case .threshold(let t): try fuse { threshold($0, t) }
+        case .vignette(let a): try fuse { vignette($0, amount: a) }
         case .recolor(let h, let s, let e, let c, let g):
-            img = try mapRGB(img) {
+            try fuse {
                 adjustColor($0, exposure: e, contrast: c, gamma: g, hue: h, saturation: s)
             }
         case .matchColor(let path):
@@ -70,16 +125,11 @@ public func applyImageOps(_ source: CGImage, _ ops: [ImageOp]) throws -> CGImage
                 throw Flux2Error.generationFailed("could not load match-color reference: \(path)")
             }
             let ref01 = (try cgImageToArray(ref) + 1) / 2
-            img = try mapRGB(img) { matchColor($0, reference: ref01) }
+            try fuse { matchColor($0, reference: ref01) }
         }
     }
+    try flush()
     return img
-}
-
-/// Convert a CGImage to RGB [0,1], apply `f`, convert back.
-private func mapRGB(_ img: CGImage, _ f: (MLXArray) -> MLXArray) throws -> CGImage {
-    let rgb01 = (try cgImageToArray(img) + 1) / 2
-    return try arrayToCGImage(f(rgb01) * 2 - 1)
 }
 
 // MARK: - Geometric (CoreGraphics)
@@ -117,7 +167,7 @@ func rotateImage(_ img: CGImage, degrees: Int) throws -> CGImage {
     return out
 }
 
-func flipImage(_ img: CGImage, mode: String) throws -> CGImage {
+func flipImage(_ img: CGImage, mode: FlipMode) throws -> CGImage {
     let w = img.width
     let h = img.height
     guard
@@ -125,9 +175,8 @@ func flipImage(_ img: CGImage, mode: String) throws -> CGImage {
             data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
     else { throw Flux2Error.generationFailed("flip context failed") }
-    let m = mode.lowercased()
-    if m.contains("h") { ctx.translateBy(x: CGFloat(w), y: 0); ctx.scaleBy(x: -1, y: 1) }
-    if m.contains("v") { ctx.translateBy(x: 0, y: CGFloat(h)); ctx.scaleBy(x: 1, y: -1) }
+    if mode.flipsHorizontally { ctx.translateBy(x: CGFloat(w), y: 0); ctx.scaleBy(x: -1, y: 1) }
+    if mode.flipsVertically { ctx.translateBy(x: 0, y: CGFloat(h)); ctx.scaleBy(x: 1, y: -1) }
     ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
     guard let out = ctx.makeImage() else { throw Flux2Error.generationFailed("flip failed") }
     return out

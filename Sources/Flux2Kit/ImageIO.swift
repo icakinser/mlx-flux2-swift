@@ -20,7 +20,7 @@ public func capPixels(_ img: CGImage, _ k: Int) throws -> CGImage {
     let scale = (Double(k) / Double(w * h)).squareRoot()
     let newW = Int(Double(w) * scale)
     let newH = Int(Double(h) * scale)
-    return try renderResized(img, width: newW, height: newH)
+    return try resizeExactRGB(img, width: newW, height: newH)
 }
 
 // Rejects images that are too small or have an extreme aspect ratio.
@@ -71,34 +71,29 @@ public func cgImageToArray(_ img: CGImage) throws -> MLXArray {
         context.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
     }
 
-    var rgb = [Float](repeating: 0, count: h * w * 3)
-    for y in 0 ..< h {
-        for x in 0 ..< w {
-            let src = y * bytesPerRow + x * 4
-            let dst = (y * w + x) * 3
-            rgb[dst] = Float(pixels[src])
-            rgb[dst + 1] = Float(pixels[src + 1])
-            rgb[dst + 2] = Float(pixels[src + 2])
-        }
-    }
-    return MLXArray(rgb, [h, w, 3]) / 127.5 - 1.0
+    // Vectorized RGBA→RGB strip + normalize. Bit-identical to the previous scalar loop: uint8→float32
+    // is exact for 0…255, and the subsequent `/ 127.5 - 1.0` is the same float32 MLX op on the same
+    // values (only the array construction changed), so numerical parity is preserved.
+    let rgba = MLXArray(pixels, [h, w, 4])  // bytesPerRow == w * 4 (no row padding)
+    let rgb = rgba[0..., 0..., 0 ..< 3].asType(.float32)
+    return rgb / 127.5 - 1.0
 }
 
-// Clip to [-1, 1], scale to uint8 RGB
+// Clip to [-1, 1], scale to uint8 RGB.
+// Upcasts to float32 first: the VAE may hand back bfloat16 (7-bit mantissa), which quantizes
+// smooth gradients into visible ±1–2 step banding. The final pixel math must run in float32.
 public func arrayToCGImage(_ arr: MLXArray) throws -> CGImage {
-    let clipped = clip(arr, min: -1.0, max: 1.0)
+    let f32 = arr.dtype == .float32 ? arr : arr.asType(.float32)
+    let clipped = clip(f32, min: -1.0, max: 1.0)
     let scaled = ((clipped + 1.0) * 127.5).asType(.uint8)
-    eval(scaled)
     let h = scaled.dim(0)
     let w = scaled.dim(1)
-    let rgb: [UInt8] = scaled.asArray(UInt8.self)
-
-    var rgba = [UInt8](repeating: 255, count: h * w * 4)
-    for i in 0 ..< (h * w) {
-        rgba[i * 4] = rgb[i * 3]
-        rgba[i * 4 + 1] = rgb[i * 3 + 1]
-        rgba[i * 4 + 2] = rgb[i * 3 + 2]
-    }
+    // Vectorized RGB→RGBA repack: append a fully-opaque alpha channel instead of a scalar loop.
+    // Pure data movement — the RGB bytes are unchanged.
+    let alpha = MLXArray.full([h, w, 1], values: MLXArray(UInt8(255)), dtype: .uint8)
+    let rgbaArray = concatenated([scaled, alpha], axis: 2)
+    eval(rgbaArray)
+    let rgba: [UInt8] = rgbaArray.asArray(UInt8.self)
     let bytesPerRow = w * 4
     guard
         let provider = CGDataProvider(data: Data(rgba) as CFData),
@@ -174,7 +169,13 @@ public func saveImage(_ img: CGImage, to url: URL, format: String) throws {
     }
 }
 
-private func renderResized(_ img: CGImage, width: Int, height: Int) throws -> CGImage {
+/// Resize a CGImage to an exact RGB size (high-quality Lanczos-equivalent). The single canonical
+/// resize used across img2img, inpaint, latent-color, and the model-free op pipeline. Returns the
+/// input unchanged when it already matches the requested size.
+func resizeExactRGB(_ img: CGImage, width: Int, height: Int) throws -> CGImage {
+    if img.width == width && img.height == height {
+        return img
+    }
     guard
         let context = CGContext(
             data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,

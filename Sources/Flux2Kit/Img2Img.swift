@@ -29,8 +29,14 @@ extension Flux2Pipeline {
         verbose: Bool = false,
         evalFreq: Int = 1
     ) throws -> CGImage {
-        guard width % 16 == 0, height % 16 == 0 else {
-            throw Flux2Error.generationFailed("width and height must be divisible by 16")
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        guard width > 0, height > 0, width % 16 == 0, height % 16 == 0 else {
+            throw Flux2Error.generationFailed(
+                "width and height must be positive multiples of 16 (got \(width)x\(height))")
+        }
+        guard numSteps > 0 else {
+            throw Flux2Error.generationFailed("numSteps must be positive (got \(numSteps))")
         }
         let strength = min(max(strength, 0.0), 1.0)
         // Full-strength requests are exactly the reference path.
@@ -40,6 +46,20 @@ extension Flux2Pipeline {
                 guidance: guidance, seed: seed, inputImages: inputImages, verbose: verbose,
                 evalFreq: evalFreq)
         }
+        // Zero strength injects no noise, so every denoise step is a no-op and the token
+        // patchify/scatter is a lossless round-trip: the result is just the VAE reconstruction of
+        // the source at the requested geometry. Short-circuit to avoid loading the transformer and
+        // running a pointless denoise loop.
+        if strength <= 0.0 {
+            try ensureVAE()
+            let vae = try requireVAE()
+            let resized = try resizeExactRGB(source, width: width, height: height)
+            let sourceArray = try cgImageToArray(resized)
+            let latents = try vae.encode(expandedDimensions(sourceArray, axis: 0)).asType(dtype)
+            let decoded = try decodeMaybeTiled(latents)
+            eval(decoded)
+            return try arrayToCGImage(decoded[0])
+        }
 
         if let seed {
             MLXRandom.seed(seed)
@@ -47,6 +67,7 @@ extension Flux2Pipeline {
 
         try ensureTextEncoder()
         try ensureVAE()
+        let vae = try requireVAE()
         reportMemory("pre-encode")
         let guidanceDistilled = isDistilled
         let (ctx, ctxIds, _) = try encodePrompt(
@@ -60,11 +81,11 @@ extension Flux2Pipeline {
 
         // Source latents at exactly the output geometry, tokenized with the same position
         // ids the noise path would produce.
-        let resized = try renderExact(source, width: width, height: height)
+        let resized = try resizeExactRGB(source, width: width, height: height)
         let sourceArray = try cgImageToArray(resized)  // (H, W, 3) in [-1, 1]
         // Consistent with encodeImageRefs: VAE encode returns NHWC-patchified
         // latents; tokenization expects channels-first (b, 128, h/16, w/16).
-        let sourceLatents = vae.encode(expandedDimensions(sourceArray, axis: 0))
+        let sourceLatents = try vae.encode(expandedDimensions(sourceArray, axis: 0))
             .transposed(0, 3, 1, 2)
         let (srcTokens, xIds) = batchedPrcImg(sourceLatents.asType(dtype))
 
@@ -94,6 +115,7 @@ extension Flux2Pipeline {
         }
         unloadTextEncoder()
         try ensureTransformer()
+        let model = try requireTransformer()
         reportMemory("pre-denoise")
         let peX = model.peEmbedder(imgInputIds)
         let peCtx = model.peEmbedder(ctxIds)
@@ -120,39 +142,7 @@ extension Flux2Pipeline {
                 evalFreq: evalFreq)
         }
 
-        x = concatenated(scatterIds(x, xIds), axis: 0)
-        if x.dim(2) == 1 {
-            x = x.squeezed(axis: 2)
-        } else {
-            x = x[0..., 0..., 0, 0..., 0...]
-        }
-        x = x.transposed(0, 2, 3, 1)
-        eval(x)
-
-        unloadTransformer()
-        reportMemory("pre-decode")
-        let decoded = decodeMaybeTiled(x)
-        eval(decoded)
-        return try arrayToCGImage(decoded[0])
+        return try scatterAndDecodeToImage(x, xIds: xIds)
     }
 
-    private func renderExact(_ img: CGImage, width: Int, height: Int) throws -> CGImage {
-        if img.width == width && img.height == height {
-            return img
-        }
-        guard
-            let context = CGContext(
-                data: nil, width: width, height: height, bitsPerComponent: 8,
-                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
-        else {
-            throw Flux2Error.generationFailed("Could not create img2img resize context")
-        }
-        context.interpolationQuality = .high
-        context.draw(img, in: CGRect(x: 0, y: 0, width: width, height: height))
-        guard let resized = context.makeImage() else {
-            throw Flux2Error.generationFailed("img2img resize failed")
-        }
-        return resized
-    }
 }

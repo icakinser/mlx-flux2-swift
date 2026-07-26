@@ -6,28 +6,6 @@ import CoreGraphics
 import Flux2Kit
 import Foundation
 
-/// Parse a `--recolor` spec like "hue=0.2,sat=1.1,exp=0.3,contrast=1.1,gamma=1.0".
-private func parseRecolor(_ s: String)
-    -> (hue: Float, sat: Float, exp: Float, contrast: Float, gamma: Float)
-{
-    var hue: Float = 0, sat: Float = 1, exp: Float = 0, contrast: Float = 1, gamma: Float = 1
-    for part in s.split(separator: ",") {
-        let kv = part.split(separator: "=")
-        guard kv.count == 2,
-            let val = Float(kv[1].trimmingCharacters(in: .whitespaces))
-        else { continue }
-        switch kv[0].trimmingCharacters(in: .whitespaces).lowercased() {
-        case "hue": hue = val
-        case "sat", "saturation": sat = val
-        case "exp", "exposure": exp = val
-        case "contrast": contrast = val
-        case "gamma": gamma = val
-        default: break
-        }
-    }
-    return (hue, sat, exp, contrast, gamma)
-}
-
 private func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("\(message)\n".utf8))
     exit(2)
@@ -36,28 +14,16 @@ private func fail(_ message: String) -> Never {
 /// Sendable box for throttling download-progress prints across the async boundary.
 private final class ProgressBox: @unchecked Sendable { var last = -1 }
 
-/// Parse "a,b,c,d" into four ints.
-private func parse4(_ s: String) -> (Int, Int, Int, Int) {
-    let p = s.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-    guard p.count == 4 else { fail("expected 4 comma-separated integers, got: \(s)") }
-    return (p[0], p[1], p[2], p[3])
+// Thin wrappers over the testable library parsers: convert a thrown `CLIParseError` into a clean
+// `fail()` (exit 2) so the executable keeps its existing single-line error behavior.
+private func parse4(_ flag: String, _ s: String) -> (Int, Int, Int, Int) {
+    do { return try parse4Arg(flag, s) } catch { fail("\(error)") }
 }
-
-/// Parse "WxH" (e.g. "512x768") into two ints.
 private func parseWxH(_ s: String) -> (Int, Int) {
-    let p = s.lowercased().split(separator: "x").compactMap {
-        Int($0.trimmingCharacters(in: .whitespaces))
-    }
-    guard p.count == 2 else { fail("expected WxH (e.g. 512x768), got: \(s)") }
-    return (p[0], p[1])
+    do { return try parseWxHArg(s) } catch { fail("\(error)") }
 }
-
-/// Parse outpaint margins: "L,R,T,B" or a single value applied to all sides.
 private func parseOutpaint(_ s: String) -> (Int, Int, Int, Int) {
-    let p = s.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-    if p.count == 1 { return (p[0], p[0], p[0], p[0]) }
-    guard p.count == 4 else { fail("--outpaint expects L,R,T,B or a single value, got: \(s)") }
-    return (p[0], p[1], p[2], p[3])
+    do { return try parseOutpaintArg(s) } catch { fail("\(error)") }
 }
 
 @main
@@ -128,13 +94,26 @@ struct Flux2KitCLI {
                 guard !args.isEmpty else { fail("missing value for \(flag)") }
                 return args.removeFirst()
             }
+            // Strict numeric parsing: a malformed value is a hard error, not a silent fallback.
+            func intArg() -> Int {
+                do { return try parseIntArg(arg, next(arg) ?? "") } catch { fail("\(error)") }
+            }
+            func doubleArg() -> Double {
+                do { return try parseDoubleArg(arg, next(arg) ?? "") } catch { fail("\(error)") }
+            }
+            func floatArg() -> Float {
+                do { return try parseFloatArg(arg, next(arg) ?? "") } catch { fail("\(error)") }
+            }
+            func uintArg() -> UInt64 {
+                do { return try parseUInt64Arg(arg, next(arg) ?? "") } catch { fail("\(error)") }
+            }
             switch arg {
             case "-p", "--prompt": prompt = next(arg)
-            case "-w", "--width": width = Int(next(arg) ?? "") ?? width; widthSet = true
-            case "-h", "--height": height = Int(next(arg) ?? "") ?? height; heightSet = true
-            case "-t", "--steps": steps = Int(next(arg) ?? "") ?? steps
-            case "--guidance": guidance = Double(next(arg) ?? "") ?? guidance
-            case "-s", "--seed": seed = UInt64(next(arg) ?? "")
+            case "-w", "--width": width = intArg(); widthSet = true
+            case "-H", "--height": height = intArg(); heightSet = true
+            case "-t", "--steps": steps = intArg()
+            case "--guidance": guidance = doubleArg()
+            case "-s", "--seed": seed = uintArg()
             case "--output": output = next(arg) ?? output
             case "--repo": repo = next(arg) ?? repo
             case "--input":
@@ -148,42 +127,47 @@ struct Flux2KitCLI {
             case "--vae-fp16": vaeFp16 = true
             case "--safe-attn": safeAttn = true
             case "-v", "--verbose": verbose = true
-            case "--eval-freq": evalFreq = Int(next(arg) ?? "") ?? evalFreq
+            case "--eval-freq": evalFreq = intArg()
             // Memory system.
             case "--low-memory": lowMemory = true
             case "--mem-report": memReport = true
-            case "--cache-limit": cacheLimitMB = Int(next(arg) ?? "")
-            case "--memory-limit": memoryLimitMB = Int(next(arg) ?? "")
-            case "--vae-tile": vaeTile = Int(next(arg) ?? "")
+            case "--cache-limit": cacheLimitMB = intArg()
+            case "--memory-limit": memoryLimitMB = intArg()
+            case "--vae-tile": vaeTile = intArg()
             // More editing + CLI expansion.
             case "--img2img": doImg2Img = true
             case "--mask-box": maskBox = next(arg)
             case "--mask-ellipse": maskEllipse = next(arg)
-            case "--mask-dilate": maskDilate = Int(next(arg) ?? "")
-            case "--mask-erode": maskErode = Int(next(arg) ?? "")
+            case "--mask-dilate": maskDilate = intArg()
+            case "--mask-erode": maskErode = intArg()
             case "--outpaint": outpaintSpec = next(arg)
             // Model-free image ops (applied in the order given; no model load).
             case "--resize": let r = parseWxH(next(arg) ?? ""); ops.append(.resize(r.0, r.1))
-            case "--scale": ops.append(.scale(Float(next(arg) ?? "") ?? 1))
-            case "--crop": let r = parse4(next(arg) ?? ""); ops.append(.crop(r.0, r.1, r.2, r.3))
-            case "--rotate": ops.append(.rotate(Int(next(arg) ?? "") ?? 0))
-            case "--flip": ops.append(.flip(next(arg) ?? "h"))
+            case "--scale": ops.append(.scale(floatArg()))
+            case "--crop": let r = parse4(arg, next(arg) ?? ""); ops.append(.crop(r.0, r.1, r.2, r.3))
+            case "--rotate": ops.append(.rotate(intArg()))
+            case "--flip":
+                let raw = next(arg) ?? "h"
+                guard let mode = FlipMode(parsing: raw) else {
+                    fail("--flip must be h, v, or hv, got: \(raw)")
+                }
+                ops.append(.flip(mode))
             case "--fit-16": ops.append(.fit16)
-            case "--pixelate": ops.append(.pixelate(Int(next(arg) ?? "") ?? 8))
+            case "--pixelate": ops.append(.pixelate(intArg()))
             case "--grayscale": ops.append(.grayscale)
             case "--sepia": ops.append(.sepia)
             case "--invert": ops.append(.invert)
             case "--auto-contrast": ops.append(.autoContrast)
-            case "--sharpen": ops.append(.sharpen(Float(next(arg) ?? "") ?? 1.0))
-            case "--blur": ops.append(.blur(Int(next(arg) ?? "") ?? 1))
-            case "--brightness": ops.append(.brightness(Float(next(arg) ?? "") ?? 0))
-            case "--saturation": ops.append(.saturation(Float(next(arg) ?? "") ?? 1))
-            case "--temperature": ops.append(.temperature(Float(next(arg) ?? "") ?? 0))
-            case "--posterize": ops.append(.posterize(Int(next(arg) ?? "") ?? 4))
-            case "--threshold": ops.append(.threshold(Float(next(arg) ?? "") ?? 0.5))
-            case "--vignette": ops.append(.vignette(Float(next(arg) ?? "") ?? 0.5))
+            case "--sharpen": ops.append(.sharpen(floatArg()))
+            case "--blur": ops.append(.blur(intArg()))
+            case "--brightness": ops.append(.brightness(floatArg()))
+            case "--saturation": ops.append(.saturation(floatArg()))
+            case "--temperature": ops.append(.temperature(floatArg()))
+            case "--posterize": ops.append(.posterize(intArg()))
+            case "--threshold": ops.append(.threshold(floatArg()))
+            case "--vignette": ops.append(.vignette(floatArg()))
             case "--match-color": ops.append(.matchColor(next(arg) ?? ""))
-            case "--num": numImages = max(1, Int(next(arg) ?? "") ?? 1)
+            case "--num": numImages = max(1, intArg())
             case "--seeds":
                 seedsList = (next(arg) ?? "").split(separator: ",").compactMap {
                     UInt64($0.trimmingCharacters(in: .whitespaces))
@@ -196,22 +180,22 @@ struct Flux2KitCLI {
             // Editing flags.
             case "--source": sourcePath = next(arg)
             case "--mask": maskPath = next(arg)
-            case "--strength": strength = Double(next(arg) ?? "")
+            case "--strength": strength = doubleArg()
             case "--invert-mask": invertMask = true
-            case "--mask-feather": maskFeather = Int(next(arg) ?? "")
+            case "--mask-feather": maskFeather = intArg()
             case "--remove": doRemove = true
             case "--add-object": addObjectPrompt = next(arg)
             case "--replace-background": replaceBgPrompt = next(arg)
             case "--edit": editPrompt = next(arg)
             case "--recolor": recolorSpec = next(arg)
             case "--experimental-latent-color": experimentalLatentColor = true
-            case "--help":
+            case "-h", "--help":
                 print("""
                 usage:
                   text-to-image:
-                    flux2kit-cli -p PROMPT [-w W] [-h H] [-t STEPS] [--guidance G] [-s SEED]
+                    flux2kit-cli -p PROMPT [-w W] [-H H] [-t STEPS] [--guidance G] [-s SEED]
                                  [--output OUT.png] [--repo PATH] [--input REF.png ...]
-                                 [-q none|int8|int4] [--dtype float16|bfloat16]
+                                 [-q none|int8|int4] [--dtype bfloat16]
                                  [--vae-fp16] [--safe-attn] [-v] [--eval-freq N]
 
                   editing (require --source; inpaint modes also require --mask;
@@ -278,9 +262,27 @@ struct Flux2KitCLI {
             if cacheLimitMB == nil { cacheLimitMB = 512 }
         }
 
+        // Validate enum-like flags up front with clear errors (rather than deep in the pipeline or,
+        // for quantize, silently ignoring an unknown mode).
+        guard ["png", "jpg", "jpeg"].contains(format.lowercased()) else {
+            fail("--format must be png or jpg, got: \(format)")
+        }
+        if let q = quantize, q != "int8", q != "int4" {
+            fail("--quantize must be none, int8, or int4, got: \(q)")
+        }
+        let outputDir = URL(fileURLWithPath: output).deletingLastPathComponent()
+        if !outputDir.path.isEmpty,
+            !FileManager.default.fileExists(atPath: outputDir.path)
+        {
+            fail("output directory does not exist: \(outputDir.path)")
+        }
+
         // Non-experimental --recolor is a model-free pixel op; fold it into the op chain.
         if let spec = recolorSpec, !experimentalLatentColor {
-            let rc = parseRecolor(spec)
+            let rc = parseRecolorArg(spec)
+            for w in rc.warnings {
+                FileHandle.standardError.write(Data("warning: \(w)\n".utf8))
+            }
             ops.append(
                 .recolor(hue: rc.hue, sat: rc.sat, exp: rc.exp, contrast: rc.contrast, gamma: rc.gamma))
             recolorSpec = nil
@@ -385,11 +387,11 @@ struct Flux2KitCLI {
                 if let maskPath {
                     resolvedMask = try loadImages([URL(fileURLWithPath: maskPath)]).first
                 } else if let spec = maskBox {
-                    let r = parse4(spec)
+                    let r = parse4("--mask-box", spec)
                     resolvedMask = try makeBoxMask(
                         width: s.width, height: s.height, x: r.0, y: r.1, boxWidth: r.2, boxHeight: r.3)
                 } else if let spec = maskEllipse {
-                    let r = parse4(spec)
+                    let r = parse4("--mask-ellipse", spec)
                     resolvedMask = try makeEllipseMask(
                         width: s.width, height: s.height, x: r.0, y: r.1, boxWidth: r.2, boxHeight: r.3)
                 }
@@ -426,7 +428,10 @@ struct Flux2KitCLI {
                         guard let spec = recolorSpec else {
                             fail("--experimental-latent-color requires --recolor \"exp=..,contrast=..,gamma=..\"")
                         }
-                        let rc = parseRecolor(spec)
+                        let rc = parseRecolorArg(spec)
+                        for w in rc.warnings {
+                            FileHandle.standardError.write(Data("warning: \(w)\n".utf8))
+                        }
                         return try pipeline.experimentalLatentColor(
                             source: src, width: width, height: height,
                             exposure: rc.exp, contrast: rc.contrast, gamma: rc.gamma)

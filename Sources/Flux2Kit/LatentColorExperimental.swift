@@ -38,16 +38,20 @@ extension Flux2Pipeline {
         source: CGImage, width: Int, height: Int,
         exposure: Float = 0, contrast: Float = 1, gamma: Float = 1
     ) throws -> CGImage {
-        guard width % 16 == 0, height % 16 == 0 else {
-            throw Flux2Error.generationFailed("width and height must be divisible by 16")
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        guard width > 0, height > 0, width % 16 == 0, height % 16 == 0 else {
+            throw Flux2Error.generationFailed(
+                "width and height must be positive multiples of 16 (got \(width)x\(height))")
         }
         try ensureVAE()
+        let vae = try requireVAE()
         let resized = try resizeExactRGB(source, width: width, height: height)
         let srcArray = try cgImageToArray(resized)
-        let latents = vae.encode(expandedDimensions(srcArray, axis: 0)).asType(dtype)
+        let latents = try vae.encode(expandedDimensions(srcArray, axis: 0)).asType(dtype)
         let adjusted = applyLatentCurve(
             latents, exposure: exposure, contrast: contrast, gamma: gamma)
-        let decoded = vae.decode(adjusted)
+        let decoded = try vae.decode(adjusted)
         eval(decoded)
         return try arrayToCGImage(decoded[0])
     }

@@ -147,15 +147,14 @@ public func listedPrcImg(_ xList: [MLXArray], _ tCoord: [MLXArray]? = nil) -> ([
 /// - Parameters:
 ///   - ae: VAE encoder
 ///   - imgCtx: List of reference images
-///   - timeOffsetScale: Multiplier for time offsets (default: 10)
 ///   - limitPixelsSingle: Max pixels for single image (default: 2048^2)
 ///   - limitPixelsMulti: Max pixels per image when multiple (default: 1024^2)
-// timeOffsetScale is intentionally unused
-// (compact time IDs 1, 2, 3, ... below).
+///
+/// Reference temporal offsets are fixed at `10 + 10*i` (the offsets klein was trained with); see the
+/// note at the position-id construction below.
 public func encodeImageRefs(
     _ ae: AutoEncoder,
     _ imgCtx: [CGImage],
-    timeOffsetScale: Int = refTimeOffsetScale,
     limitPixelsSingle: Int = refImageLimitPixelsSingle,
     limitPixelsMulti: Int = refImageLimitPixelsMulti
 ) throws -> (MLXArray?, MLXArray?) {
@@ -171,7 +170,7 @@ public func encodeImageRefs(
     let imgCtxPrep = try imgCtx.map { try defaultPrep($0, limitPixels: limitPixels) }
     var encodedRefs: [MLXArray] = []
     for img in imgCtxPrep {
-        var latent = ae.encode(MLX.expandedDimensions(img, axis: 0))
+        var latent = try ae.encode(MLX.expandedDimensions(img, axis: 0))
         latent = latent.transposed(0, 3, 1, 2)[0]
         encodedRefs.append(latent)
     }
@@ -206,11 +205,13 @@ public func scatterIds(_ x: MLXArray, _ xIds: MLXArray) -> [MLXArray] {
         let hIds = pos[0..., 1].asType(.int32)
         let wIds = pos[0..., 2].asType(.int32)
 
-        // Query dimension bounds - .item() forces sync
+        // Query dimension bounds. Evaluating all four reductions together forces a single
+        // host<->device sync per batch element instead of one per `.item()` read.
         let tMin = MLX.min(tIds)
         let tMax = MLX.max(tIds)
         let hMax = MLX.max(hIds)
         let wMax = MLX.max(wIds)
+        MLX.eval(tMin, tMax, hMax, wMax)
         let tMinVal = tMin.item(Int.self)
         let tMaxVal = tMax.item(Int.self)
         let h = hMax.item(Int.self) + 1

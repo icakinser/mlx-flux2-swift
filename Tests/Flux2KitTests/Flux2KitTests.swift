@@ -111,16 +111,18 @@ private func onCPUThrows(_ body: () throws -> Void) throws {
 }
 
 /// The full step schedule is rescaled into `[strength, 0]` (no truncation), preserving monotonicity.
-@Test(.enabled(if: mlxTestsEnabled)) func scheduleRescaleIntoStrengthWindow() {
-    onCPU {
+@Test(.enabled(if: mlxTestsEnabled)) func scheduleRescaleIntoStrengthWindow() throws {
+    try onCPUThrows {
         let full = getSchedule(4, 256)
         #expect(full.count == 5)
-        #expect(full.first! > 0)
+        let firstFull = try #require(full.first)
+        #expect(firstFull > 0)
         for i in 1 ..< full.count { #expect(full[i] <= full[i - 1]) }
         let s = 0.6
         let rescaled = full.map { $0 * s }
-        #expect(abs(rescaled.first! - full.first! * s) < 1e-12)
-        #expect(rescaled.first! < full.first!)
+        let firstRescaled = try #require(rescaled.first)
+        #expect(abs(firstRescaled - firstFull * s) < 1e-12)
+        #expect(firstRescaled < firstFull)
         for i in 1 ..< rescaled.count { #expect(rescaled[i] <= rescaled[i - 1]) }
     }
 }
@@ -290,6 +292,44 @@ private func onCPUThrows(_ body: () throws -> Void) throws {
     #expect(rotated.width == 80 && rotated.height == 100)  // 90° swaps dims
     let fit = try applyImageOps(img, [.fit16])  // 100x80 -> 96x80
     #expect(fit.width % 16 == 0 && fit.height % 16 == 0 && fit.width == 96)
+    // Flip preserves dimensions; FlipMode parses the documented spellings.
+    let flipped = try applyImageOps(img, [.flip(.both)])
+    #expect(flipped.width == 100 && flipped.height == 80)
+    #expect(FlipMode(parsing: "H") == .horizontal)
+    #expect(FlipMode(parsing: "vh") == .both)
+    #expect(FlipMode(parsing: "diagonal") == nil)
+}
+
+/// Fused elementwise ops in `applyImageOps` behave correctly: a chain of consecutive MLX ops runs
+/// without a per-op CGImage round-trip, and inverting twice recovers the input within uint8 error.
+@Test(.enabled(if: mlxTestsEnabled)) func applyImageOpsFusedChain() throws {
+    let w = 8, h = 6
+    var rgba = [UInt8](repeating: 255, count: h * w * 4)
+    for i in 0 ..< (h * w) {
+        rgba[i * 4] = UInt8((i * 3) % 256)
+        rgba[i * 4 + 1] = UInt8((i * 5) % 256)
+        rgba[i * 4 + 2] = UInt8((i * 7) % 256)
+    }
+    let provider = CGDataProvider(data: Data(rgba) as CFData)!
+    let img = CGImage(
+        width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+    try onCPUThrows {
+        // Two inverts fuse into one round-trip and cancel out.
+        let out = try applyImageOps(img, [.invert, .invert])
+        #expect(out.width == w && out.height == h)
+        let a = try cgImageToArray(img)
+        let b = try cgImageToArray(out)
+        MLX.eval(a, b)
+        let av = a.asArray(Float.self), bv = b.asArray(Float.self)
+        for i in 0 ..< av.count { #expect(abs(av[i] - bv[i]) < 2.0 / 255.0 + 1e-4) }
+
+        // A geometric op interleaved with fused ops still yields correct dimensions.
+        let mixed = try applyImageOps(img, [.brightness(0.1), .rotate(90), .invert])
+        #expect(mixed.width == h && mixed.height == w)
+    }
 }
 
 /// Effect filters: posterize/threshold quantize, brightness offsets, auto-contrast stretches.
@@ -312,6 +352,255 @@ private func onCPUThrows(_ body: () throws -> Void) throws {
 
         let warm = adjustTemperature(rgb, 0.5).asArray(Float.self)  // red up
         #expect(warm[0] >= orig[0] - 1e-6)
+    }
+}
+
+// MARK: - CLI parsing (Q3 / V1 / V3)
+
+/// Strict numeric parsers accept valid input and throw a descriptive `CLIParseError` on garbage,
+/// rather than silently falling back to a default value.
+@Test func cliNumericParsersStrict() throws {
+    #expect(try parseIntArg("--steps", "8") == 8)
+    #expect(try parseDoubleArg("--guidance", "3.5") == 3.5)
+    #expect(try parseUInt64Arg("--seed", "42") == 42)
+    #expect(try parseFloatArg("--sharpen", "1.5") == Float(1.5))
+
+    for bad in ["", "abc", "3.5x", "--", "0x10"] {
+        do {
+            _ = try parseIntArg("--steps", bad)
+            Issue.record("expected throw for '\(bad)'")
+        } catch { #expect(error is CLIParseError) }
+    }
+    do {
+        _ = try parseUInt64Arg("--seed", "-1")
+        Issue.record("expected throw for negative seed")
+    } catch { #expect(error is CLIParseError) }
+}
+
+/// WxH / 4-tuple / outpaint parsers accept valid specs and reject malformed ones.
+@Test func cliTupleParsers() throws {
+    let (w, h) = try parseWxHArg("512x768")
+    #expect(w == 512 && h == 768)
+    do { _ = try parseWxHArg("512"); Issue.record("expected throw") } catch { #expect(error is CLIParseError) }
+    do { _ = try parseWxHArg("axb"); Issue.record("expected throw") } catch { #expect(error is CLIParseError) }
+
+    let four = try parse4Arg("--crop", "1,2,3,4")
+    #expect(four == (1, 2, 3, 4))
+    do { _ = try parse4Arg("--crop", "1,2,3"); Issue.record("expected throw") } catch { #expect(error is CLIParseError) }
+
+    #expect(try parseOutpaintArg("7") == (7, 7, 7, 7))
+    #expect(try parseOutpaintArg("1,2,3,4") == (1, 2, 3, 4))
+    do { _ = try parseOutpaintArg("1,2"); Issue.record("expected throw") } catch { #expect(error is CLIParseError) }
+}
+
+/// `parseRecolorArg` maps known keys, and collects warnings for unknown keys / bad values instead of
+/// silently dropping them.
+@Test func cliRecolorParserWarnings() {
+    let ok = parseRecolorArg("hue=0.2,sat=1.1,exp=0.3,contrast=1.2,gamma=0.9")
+    #expect(ok.hue == Float(0.2))
+    #expect(ok.sat == Float(1.1))
+    #expect(ok.gamma == Float(0.9))
+    #expect(ok.warnings.isEmpty)
+
+    let bad = parseRecolorArg("hue=0.2,bogus=1,contrast=notnum,malformed")
+    #expect(bad.hue == Float(0.2))
+    #expect(bad.warnings.count == 3)  // unknown key, non-number, malformed term
+}
+
+// MARK: - Negative paths / edge cases (Q5)
+
+/// `applyImageOps` rejects an unsupported rotation angle rather than silently no-op'ing.
+@Test func rotateInvalidDegreesThrows() throws {
+    let img = try makeBoxMask(width: 32, height: 32, x: 4, y: 4, boxWidth: 8, boxHeight: 8)
+    do {
+        _ = try applyImageOps(img, [.rotate(45)])
+        Issue.record("expected rotate(45) to throw")
+    } catch {
+        #expect(error is Flux2Error)
+    }
+    // Supported angles and 0 (identity) do not throw.
+    _ = try applyImageOps(img, [.rotate(0)])
+    _ = try applyImageOps(img, [.rotate(270)])
+}
+
+/// `capMinPixels` rejects too-small images and extreme aspect ratios.
+@Test func capMinPixelsRejectsBadImages() throws {
+    let tiny = try makeBoxMask(width: 16, height: 16, x: 0, y: 0, boxWidth: 4, boxHeight: 4)
+    do {
+        _ = try capMinPixels(tiny)
+        Issue.record("expected capMinPixels to reject a 16x16 image")
+    } catch { #expect(error is Flux2Error) }
+
+    let wide = try makeBoxMask(width: 900, height: 64, x: 0, y: 0, boxWidth: 10, boxHeight: 10)
+    do {
+        _ = try capMinPixels(wide)  // 900/64 ≈ 14 > maxAr 8
+        Issue.record("expected capMinPixels to reject extreme aspect ratio")
+    } catch { #expect(error is Flux2Error) }
+}
+
+// MARK: - Weight conversion validation (C1/C2)
+
+/// An empty weight dict makes the VAE conversion throw `missingWeights` naming the first required
+/// tensor, instead of silently returning a partial/empty dictionary.
+@Test func vaeConversionThrowsOnEmpty() {
+    do {
+        _ = try convertVaeDiffusersWeights([:])
+        Issue.record("expected convertVaeDiffusersWeights to throw on empty input")
+    } catch let e as Flux2Error {
+        if case .missingWeights = e {} else {
+            Issue.record("expected .missingWeights, got \(e)")
+        }
+    } catch {
+        Issue.record("expected Flux2Error, got \(error)")
+    }
+}
+
+/// A dict that supplies one bn stat but omits the other still fails fast at conversion.
+@Test(.enabled(if: mlxTestsEnabled)) func vaeConversionThrowsOnMissingKey() {
+    onCPU {
+        let one = MLXArray([Float(0)], [1])
+        // Only running_mean present; running_var missing.
+        let partial: [String: MLXArray] = ["bn.running_mean": one]
+        do {
+            _ = try convertVaeDiffusersWeights(partial)
+            Issue.record("expected throw on missing bn.running_var")
+        } catch let e as Flux2Error {
+            if case .missingWeights = e {} else { Issue.record("expected .missingWeights, got \(e)") }
+        } catch {
+            Issue.record("expected Flux2Error, got \(error)")
+        }
+    }
+}
+
+private func tinyFluxConfig(depth: Int, single: Int) -> Flux2Config {
+    Flux2Config(
+        inChannels: 128, contextInDim: 16, hiddenSize: 32, numHeads: 4, depth: depth,
+        depthSingleBlocks: single, axesDim: [8, 8], theta: 10000, mlpRatio: 4, useGuidanceEmbed: false)
+}
+
+/// A checkpoint missing a required top-level rename tensor throws (previously silently skipped).
+@Test func transformerConversionThrowsOnMissingRename() {
+    let cfg = tinyFluxConfig(depth: 0, single: 0)
+    do {
+        _ = try convertFlux2DiffusersWeights([:], cfg)
+        Issue.record("expected convertFlux2DiffusersWeights to throw on empty input")
+    } catch let e as Flux2Error {
+        if case .missingWeights = e {} else { Issue.record("expected .missingWeights, got \(e)") }
+    } catch {
+        Issue.record("expected Flux2Error, got \(error)")
+    }
+}
+
+/// With depth 0 (no blocks) and all top-level rename tensors present, conversion succeeds and maps
+/// every rename entry to its native destination key.
+@Test(.enabled(if: mlxTestsEnabled)) func transformerConversionMapsRenameKeys() throws {
+    try onCPUThrows {
+        let one = MLXArray([Float(0)], [1])
+        // norm_out needs an even row count: the converter swaps its scale/shift halves.
+        let two = MLXArray([Float(0), Float(0)], [2, 1])
+        let srcKeys = [
+            "x_embedder.weight", "context_embedder.weight",
+            "time_guidance_embed.timestep_embedder.linear_1.weight",
+            "time_guidance_embed.timestep_embedder.linear_2.weight",
+            "double_stream_modulation_img.linear.weight",
+            "double_stream_modulation_txt.linear.weight",
+            "single_stream_modulation.linear.weight",
+            "proj_out.weight",
+        ]
+        var weights: [String: MLXArray] = [:]
+        for k in srcKeys { weights[k] = one }
+        weights["norm_out.linear.weight"] = two
+        let out = try convertFlux2DiffusersWeights(weights, tinyFluxConfig(depth: 0, single: 0))
+        #expect(out["img_in.weight"] != nil)
+        #expect(out["txt_in.weight"] != nil)
+        #expect(out["final_layer.linear.weight"] != nil)
+        #expect(out.count == srcKeys.count + 1)
+    }
+}
+
+/// Parity regression (2026-07-26): diffusers' AdaLayerNormContinuous stores the final-layer
+/// modulation as [scale, shift] while the BFL LastLayer splits [shift, scale]. The converter must
+/// swap the two row-halves of `norm_out.linear.weight`, or every image decodes with transposed
+/// scale/shift (mottled artifacts; see Fixtures/ref_bike_s42.png parity check).
+@Test(.enabled(if: mlxTestsEnabled)) func transformerConversionSwapsNormOutHalves() throws {
+    try onCPUThrows {
+        let one = MLXArray([Float(0)], [1])
+        var weights: [String: MLXArray] = [:]
+        for k in [
+            "x_embedder.weight", "context_embedder.weight",
+            "time_guidance_embed.timestep_embedder.linear_1.weight",
+            "time_guidance_embed.timestep_embedder.linear_2.weight",
+            "double_stream_modulation_img.linear.weight",
+            "double_stream_modulation_txt.linear.weight",
+            "single_stream_modulation.linear.weight",
+            "proj_out.weight",
+        ] { weights[k] = one }
+        // Rows 0-1 = diffusers scale rows, rows 2-3 = diffusers shift rows.
+        weights["norm_out.linear.weight"] = MLXArray((0 ..< 8).map { Float($0) }, [4, 2])
+        let out = try convertFlux2DiffusersWeights(weights, tinyFluxConfig(depth: 0, single: 0))
+        let converted = try #require(out["final_layer.adaLN_modulation.1.weight"])
+        // Expect [shift rows; scale rows]: [[4,5],[6,7],[0,1],[2,3]]
+        let expected: [Float] = [4, 5, 6, 7, 0, 1, 2, 3]
+        #expect(converted.asArray(Float.self) == expected)
+
+        // Odd row count cannot be split into halves and must throw.
+        weights["norm_out.linear.weight"] = MLXArray([Float(0), 0, 0], [3, 1])
+        #expect(throws: Flux2Error.self) {
+            _ = try convertFlux2DiffusersWeights(weights, tinyFluxConfig(depth: 0, single: 0))
+        }
+    }
+}
+
+// MARK: - Image I/O (vectorized RGBA<->RGB path)
+
+/// The vectorized `cgImageToArray` must reproduce the exact values the scalar luminance/normalize
+/// loop produced: uint8→float via `v/127.5 - 1`. Uses a known solid-color image so the expected
+/// values are hand-computable, guarding the parity-critical conversion.
+@Test(.enabled(if: mlxTestsEnabled)) func cgImageToArrayKnownValues() throws {
+    // Solid RGB (200, 100, 50) opaque image.
+    let w = 4, h = 3
+    var rgba = [UInt8](repeating: 0, count: h * w * 4)
+    for i in 0 ..< (h * w) {
+        rgba[i * 4] = 200
+        rgba[i * 4 + 1] = 100
+        rgba[i * 4 + 2] = 50
+        rgba[i * 4 + 3] = 255
+    }
+    let provider = CGDataProvider(data: Data(rgba) as CFData)!
+    let img = CGImage(
+        width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+    try onCPUThrows {
+        let arr = try cgImageToArray(img)  // (h, w, 3) in [-1, 1]
+        #expect(arr.shape == [h, w, 3])
+        MLX.eval(arr)
+        let expectedR = Float(200) / 127.5 - 1.0
+        let expectedG = Float(100) / 127.5 - 1.0
+        let expectedB = Float(50) / 127.5 - 1.0
+        #expect(abs(arr[0, 0, 0].item(Float.self) - expectedR) < 1e-6)
+        #expect(abs(arr[1, 2, 1].item(Float.self) - expectedG) < 1e-6)
+        #expect(abs(arr[2, 3, 2].item(Float.self) - expectedB) < 1e-6)
+    }
+}
+
+/// `arrayToCGImage` → `cgImageToArray` is a stable round-trip: the vectorized RGB→RGBA repack loses
+/// no channel data, so re-reading the encoded image recovers the (uint8-quantized) input.
+@Test(.enabled(if: mlxTestsEnabled)) func imageRoundTripStable() throws {
+    try onCPUThrows {
+        // Values chosen to sit near uint8 bucket centers so quantization is stable.
+        let src = MLXArray(
+            [Float(-1.0), -0.5, 0.0, 0.5, 1.0, -0.2, 0.2, -0.8, 0.8].map { $0 },
+            [1, 3, 3])
+        let img = try arrayToCGImage(src)
+        #expect(img.width == 3 && img.height == 1)
+        let back = try cgImageToArray(img)
+        MLX.eval(back)
+        let a = src.asArray(Float.self)
+        let b = back.asArray(Float.self)
+        // uint8 quantization step in [-1,1] space is 2/255 ≈ 0.0078; allow one step.
+        for i in 0 ..< a.count { #expect(abs(a[i] - b[i]) < 2.0 / 255.0 + 1e-4) }
     }
 }
 

@@ -26,22 +26,72 @@ private func isFloatingPoint(_ dtype: DType) -> Bool {
     }
 }
 
+/// Orchestrates the FLUX.2 text-encoder → transformer → VAE stages, including staged residency.
+///
+/// - Important: `Flux2Pipeline` is **not** safe for concurrent generation. Seeded reproducibility
+///   relies on the process-global MLX RNG (`MLXRandom.seed` / `MLXRandom.normal`), and staged
+///   residency mutates shared `model`/`vae`/`textEncoder` storage. Two overlapping `generate*`
+///   calls would race on both. All public generation entry points serialize on `generationLock`
+///   (a recursive lock, since `generateImg2Img` at full strength re-enters `generate`), which makes
+///   concurrent calls safe by running them one at a time. For real parallelism, use separate
+///   processes rather than shared instances.
+/// Ergonomic bundle of text-to-image parameters for `Flux2Pipeline.generate(_:inputImages:)`. Lets
+/// callers set only the fields they care about instead of threading a long positional argument list.
+public struct GenerationOptions: Sendable {
+    public var prompt: String
+    public var width: Int
+    public var height: Int
+    public var numSteps: Int
+    public var guidance: Double
+    public var seed: UInt64?
+    public var guidanceDistilled: Bool?
+    public var verbose: Bool
+    public var evalFreq: Int
+
+    public init(
+        prompt: String,
+        width: Int = defaultWidth,
+        height: Int = defaultHeight,
+        numSteps: Int = defaultSteps,
+        guidance: Double = Double(defaultGuidance),
+        seed: UInt64? = nil,
+        guidanceDistilled: Bool? = nil,
+        verbose: Bool = false,
+        evalFreq: Int = 1
+    ) {
+        self.prompt = prompt
+        self.width = width
+        self.height = height
+        self.numSteps = numSteps
+        self.guidance = guidance
+        self.seed = seed
+        self.guidanceDistilled = guidanceDistilled
+        self.verbose = verbose
+        self.evalFreq = evalFreq
+    }
+}
+
 public final class Flux2Pipeline {
+
+    /// Serializes generation so concurrent callers cannot corrupt the global RNG or the residency
+    /// state. Recursive because `generateImg2Img` (strength ≥ 1) delegates to `generate`.
+    let generationLock = NSRecursiveLock()
 
     public let repoId: String
     public let repoPath: URL
-    public let weightsPath: URL
     public let safeAttn: Bool
     public let vaeFp16: Bool
     public let dtype: DType
     public let quantizeMode: String?
     public private(set) var isDistilled: Bool = false
 
-    // Implicitly-unwrapped so existing access sites are unchanged, but the backing storage can be
-    // freed (set to nil) between stages under `.unloadAfterUse` and lazily reloaded.
-    public private(set) var model: Flux2Transformer!
-    public private(set) var vae: AutoEncoder!
-    public private(set) var textEncoder: Qwen3Embedder!
+    // Optional backing storage: each sub-model can be freed (set to nil) between stages under
+    // `.unloadAfterUse` and lazily reloaded. Access through `requireTransformer()` / `requireVAE()` /
+    // `requireTextEncoder()`, which throw a descriptive error instead of trapping when a stage has
+    // not been loaded yet (previously these were implicitly-unwrapped and would crash the process).
+    public private(set) var model: Flux2Transformer?
+    public private(set) var vae: AutoEncoder?
+    public private(set) var textEncoder: Qwen3Embedder?
 
     public var residency: ResidencyPolicy
     public let memReport: Bool
@@ -73,13 +123,18 @@ public final class Flux2Pipeline {
     ) async throws {
         self.repoId = repoId
         self.repoPath = try resolveRepoPath(repoId, repoPath)
-        self.weightsPath = self.repoPath
         self.safeAttn = safeAttn
         self.vaeFp16 = vaeFp16
 
         switch dtype {
         case "bfloat16": self.dtype = .bfloat16
-        case "float16": self.dtype = .float16
+        case "float16":
+            // FLUX.2 transformer weights and activations require bfloat16's exponent range
+            // (max ~3.4e38). float16 caps at 65504; intermediate attention/MLP values overflow
+            // to inf → NaN → all-black output. Use --vae-fp16 for float16 VAE decode instead.
+            throw Flux2Error.configMissing(
+                "dtype float16 is not supported for the transformer (activations overflow float16 range). "
+                + "Use the default bfloat16, or --vae-fp16 for float16 VAE decode only.")
         default: throw Flux2Error.configMissing("Unsupported dtype: \(dtype)")
         }
         self.quantizeMode = quantize
@@ -89,7 +144,7 @@ public final class Flux2Pipeline {
 
         // --- Configs + tokenizer (cheap). Heavy weights load per residency policy below. ---
 
-        let indexPath = self.weightsPath.appendingPathComponent("model_index.json")
+        let indexPath = self.repoPath.appendingPathComponent("model_index.json")
         let distilled: Bool
         if let data = try? Data(contentsOf: indexPath),
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -101,10 +156,10 @@ public final class Flux2Pipeline {
         self.isDistilled = distilled
 
         self.fluxCfg = try loadFlux2Config(
-            self.weightsPath.appendingPathComponent("transformer/config.json"))
-        self.vaeCfg = try loadVaeConfig(self.weightsPath.appendingPathComponent("vae/config.json"))
+            self.repoPath.appendingPathComponent("transformer/config.json"))
+        self.vaeCfg = try loadVaeConfig(self.repoPath.appendingPathComponent("vae/config.json"))
         self.qwenCfg = try loadQwen3Config(
-            self.weightsPath.appendingPathComponent("text_encoder/config.json"))
+            self.repoPath.appendingPathComponent("text_encoder/config.json"))
         self.tokenizer = try await Qwen3Tokenizer.fromRepo(self.repoPath)
 
         // keepResident (default): load all three now — identical to prior behavior.
@@ -128,7 +183,7 @@ public final class Flux2Pipeline {
         // Transformer weights: native single-file fast path, else diffusers conversion
         var modelWeight: URL?
         for weightFile in weightFiles {
-            let candidate = weightsPath.appendingPathComponent(weightFile)
+            let candidate = repoPath.appendingPathComponent(weightFile)
             if FileManager.default.fileExists(atPath: candidate.path) {
                 modelWeight = candidate
                 break
@@ -138,7 +193,7 @@ public final class Flux2Pipeline {
             try alignAndLoad(m, try loadSafetensors([modelWeight]), strict: true)
         } else {
             // Sharded diffusers format (e.g. 9B model with index json), then single file fallback
-            let diffusersDir = weightsPath.appendingPathComponent("transformer")
+            let diffusersDir = repoPath.appendingPathComponent("transformer")
             let indexPath = diffusersDir.appendingPathComponent(
                 "diffusion_pytorch_model.safetensors.index.json")
             if FileManager.default.fileExists(atPath: indexPath.path) {
@@ -172,13 +227,13 @@ public final class Flux2Pipeline {
         } else {
             setDtype(v, dtype)
         }
-        let vaeWeight = weightsPath.appendingPathComponent(
+        let vaeWeight = repoPath.appendingPathComponent(
             "vae/diffusion_pytorch_model.safetensors")
         guard FileManager.default.fileExists(atPath: vaeWeight.path) else {
             throw Flux2Error.loadFailed("Could not locate VAE weights")
         }
         let vaeRaw = try loadSafetensors([vaeWeight])
-        let vaeMapped = convertVaeDiffusersWeights(vaeRaw)
+        let vaeMapped = try convertVaeDiffusersWeights(vaeRaw)
         try alignAndLoadFromTorch(v, vaeMapped, strict: true)
         MLX.Memory.clearCache()
         return v
@@ -188,7 +243,7 @@ public final class Flux2Pipeline {
         let emb = Qwen3Embedder(qwenCfg, tokenizer: tokenizer, safeAttn: safeAttn)
         setDtype(emb.model, dtype)
         // Text encoder shards — silent-overwrite merge across shards
-        var teDir = weightsPath.appendingPathComponent("text_encoder")
+        var teDir = repoPath.appendingPathComponent("text_encoder")
         var shardPaths = listSafetensors(teDir)
         if shardPaths.isEmpty {
             // Base-repo fallback
@@ -226,9 +281,38 @@ public final class Flux2Pipeline {
         if vae == nil { vae = try makeVAE() }
     }
 
+    // Non-optional accessors: throw a descriptive error when a stage is not resident, rather than
+    // trapping. Call the matching `ensure*()` first; binding the result to a `let` of the same name
+    // lets the rest of a method body use the model unchanged.
+    func requireTransformer() throws -> Flux2Transformer {
+        guard let model else {
+            throw Flux2Error.generationFailed("transformer not loaded (call ensureTransformer first)")
+        }
+        return model
+    }
+    func requireVAE() throws -> AutoEncoder {
+        guard let vae else {
+            throw Flux2Error.generationFailed("VAE not loaded (call ensureVAE first)")
+        }
+        return vae
+    }
+    func requireTextEncoder() throws -> Qwen3Embedder {
+        guard let textEncoder else {
+            throw Flux2Error.generationFailed("text encoder not loaded (call ensureTextEncoder first)")
+        }
+        return textEncoder
+    }
+
     /// Free a stage's model — no-op under `.keepResident`.
     public func unloadTextEncoder() {
-        if residency == .unloadAfterUse { textEncoder = nil; MLX.Memory.clearCache() }
+        if residency == .unloadAfterUse {
+            textEncoder = nil
+            // The CFG empty-context is derived from this encoder instance; drop it so a later
+            // reload (possibly at a different dtype/quantization) re-encodes rather than reusing a
+            // stale tensor.
+            cachedEmptyCtx = nil
+            MLX.Memory.clearCache()
+        }
     }
     public func unloadTransformer() {
         if residency == .unloadAfterUse { model = nil; MLX.Memory.clearCache() }
@@ -250,6 +334,7 @@ public final class Flux2Pipeline {
 
         // Load the text encoder if a low-memory session freed it (safe no-op when resident).
         try ensureTextEncoder()
+        let textEncoder = try requireTextEncoder()
 
         var t0 = ProcessInfo.processInfo.systemUptime
         let (inputIds, attentionMask) = try textEncoder.tokenize(prompts)
@@ -303,6 +388,22 @@ public final class Flux2Pipeline {
     }
 
     // Full text-to-image generation pipeline: encode, denoise, decode.
+    /// Convenience overload that forwards a `GenerationOptions` bundle to the positional `generate`.
+    /// `inputImages` stays a separate argument because `CGImage` is not `Sendable`.
+    public func generate(_ options: GenerationOptions, inputImages: [CGImage]? = nil) throws -> CGImage {
+        try generate(
+            prompt: options.prompt,
+            width: options.width,
+            height: options.height,
+            numSteps: options.numSteps,
+            guidance: options.guidance,
+            seed: options.seed,
+            inputImages: inputImages,
+            guidanceDistilled: options.guidanceDistilled,
+            verbose: options.verbose,
+            evalFreq: options.evalFreq)
+    }
+
     public func generate(
         prompt: String,
         width: Int = defaultWidth,
@@ -315,10 +416,18 @@ public final class Flux2Pipeline {
         verbose: Bool = false,
         evalFreq: Int = 1
     ) throws -> CGImage {
+        generationLock.lock()
+        defer { generationLock.unlock() }
         let guidanceDistilled = guidanceDistilled ?? isDistilled
 
-        guard width % 16 == 0, height % 16 == 0 else {
-            throw Flux2Error.generationFailed("width and height must be divisible by 16")
+        // `% 16 == 0` alone accepts 0 and negatives (e.g. -16 % 16 == 0), which yield empty latents
+        // or crashes deeper in the pipeline; require strictly-positive, 16-aligned dimensions.
+        guard width > 0, height > 0, width % 16 == 0, height % 16 == 0 else {
+            throw Flux2Error.generationFailed(
+                "width and height must be positive multiples of 16 (got \(width)x\(height))")
+        }
+        guard numSteps > 0 else {
+            throw Flux2Error.generationFailed("numSteps must be positive (got \(numSteps))")
         }
 
         if let seed {
@@ -351,6 +460,7 @@ public final class Flux2Pipeline {
         var imgCondSeqIds: MLXArray?
         if let inputImages, !inputImages.isEmpty {
             try ensureVAE()
+            let vae = try requireVAE()
             t0 = ProcessInfo.processInfo.systemUptime
             (imgCondSeq, imgCondSeqIds) = try encodeImageRefs(vae, inputImages)
             if verbose, let s = imgCondSeq, let i = imgCondSeqIds {
@@ -363,6 +473,7 @@ public final class Flux2Pipeline {
 
         unloadTextEncoder()
         try ensureTransformer()
+        let model = try requireTransformer()
         reportMemory("pre-denoise")
         t0 = ProcessInfo.processInfo.systemUptime
         let batchSize = 1
@@ -470,7 +581,7 @@ public final class Flux2Pipeline {
         try ensureVAE()
         reportMemory("pre-decode")
         t0 = ProcessInfo.processInfo.systemUptime
-        let decoded = decodeMaybeTiled(x)
+        let decoded = try decodeMaybeTiled(x)
         eval(decoded)
         timings["vae_decode"] = ProcessInfo.processInfo.systemUptime - t0
 

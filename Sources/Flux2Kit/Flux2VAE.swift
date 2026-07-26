@@ -248,7 +248,6 @@ public final class Encoder: Module {
         let inChMult = [1] + chMult
         var down = [EncoderDownBlock]()
         var blockIn = ch
-        var currRes = resolution
         for iLevel in 0 ..< numResolutions {
             var block = [ResnetBlock]()
             blockIn = ch * inChMult[iLevel]
@@ -261,11 +260,9 @@ public final class Encoder: Module {
             var downsample: Downsample? = nil
             if iLevel != numResolutions - 1 {
                 downsample = Downsample(inChannels: blockIn)
-                currRes = currRes / 2
             }
             down.append(EncoderDownBlock(block: block, downsample: downsample))
         }
-        _ = currRes  // Tracks curr_res but never reads it
         self._down.wrappedValue = down
 
         self._mid.wrappedValue = VAEMidBlock(
@@ -432,6 +429,9 @@ public final class AutoEncoder: Module {
     // _inv_norm_scale / _inv_norm_mean exclusion.
     private var _invNormScale: MLXArray? = nil
     private var _invNormMean: MLXArray? = nil
+    // Guards the lazy population of the two caches above. The pipeline already serializes generation,
+    // but `AutoEncoder` is public and may be used standalone, so protect the read-modify-write here.
+    private let _invNormLock = NSLock()
 
     public init(params: VAEConfig) {
         self.params = params
@@ -476,28 +476,43 @@ public final class AutoEncoder: Module {
     // Running stats are read lazily on first call
     // and cached. Read through parameters() because MLXNN.BatchNorm's runningMean/runningVar
     // properties are internal to MLXNN.
-    public func invNormalize(_ z: MLXArray) -> MLXArray {
-        if _invNormScale == nil || _invNormMean == nil {
-            let bnParameters = bn.parameters()
-            guard let runningVar = bnParameters[unwrapping: "running_var"],
-                let runningMean = bnParameters[unwrapping: "running_mean"]
-            else {
-                // Unreachable by construction (init passes trackRunningStats: true).
-                fatalError("Flux2VAE.AutoEncoder: BatchNorm running stats are missing")
-            }
-            _invNormScale = sqrt(runningVar.reshaped(1, 1, 1, -1) + bnEps)
-            _invNormMean = runningMean.reshaped(1, 1, 1, -1)
-        }
-        guard let scale = _invNormScale, let mean = _invNormMean else {
-            fatalError("Flux2VAE.AutoEncoder: inverse-normalization cache unavailable")
-        }
+    public func invNormalize(_ z: MLXArray) throws -> MLXArray {
+        let (scale, mean) = try invNormStats()
         return z * scale + mean
+    }
+
+    /// Lazily builds and caches the inverse-normalization scale/mean under a lock.
+    private func invNormStats() throws -> (MLXArray, MLXArray) {
+        _invNormLock.lock()
+        defer { _invNormLock.unlock() }
+        if let scale = _invNormScale, let mean = _invNormMean {
+            return (scale, mean)
+        }
+        let bnParameters = bn.parameters()
+        guard let runningVar = bnParameters[unwrapping: "running_var"],
+            let runningMean = bnParameters[unwrapping: "running_mean"]
+        else {
+            // Normally unreachable (init passes trackRunningStats: true and weight loading
+            // requires bn.running_mean/var); throw rather than abort so a malformed checkpoint
+            // surfaces a catchable error.
+            throw Flux2Error.missingWeights(
+                "VAE BatchNorm running stats missing (running_mean/running_var)")
+        }
+        let scale = sqrt(runningVar.reshaped(1, 1, 1, -1) + bnEps)
+        let mean = runningMean.reshaped(1, 1, 1, -1)
+        _invNormScale = scale
+        _invNormMean = mean
+        return (scale, mean)
     }
 
     // Deterministic encode: takes the mean half of
     // the moments, patchifies (pi, pj) into channels, then batch-normalizes
-    public func encode(_ x: MLXArray) -> MLXArray {
+    public func encode(_ x: MLXArray) throws -> MLXArray {
         var x = x
+        guard x.ndim == 4 else {
+            throw Flux2Error.generationFailed(
+                "VAE encode expects a 4D NHWC tensor, got shape \(x.shape)")
+        }
         let origDtype = x.dtype
         if forceUpcast && x.dtype != .float32 {
             x = x.asType(.float32)
@@ -509,6 +524,10 @@ public final class AutoEncoder: Module {
         let w = mean.dim(2)
         let c = mean.dim(3)
         let (pi, pj) = ps
+        guard pi > 0, pj > 0, h % pi == 0, w % pj == 0 else {
+            throw Flux2Error.generationFailed(
+                "VAE encode: encoder output \(h)x\(w) is not divisible by patch size \(pi)x\(pj)")
+        }
         // Per-channel patchify transpose order
         mean = mean.reshaped(b, h / pi, pi, w / pj, pj, c)
         mean = mean.transposed(0, 1, 3, 5, 2, 4)
@@ -522,18 +541,22 @@ public final class AutoEncoder: Module {
 
     // Inverse-normalize then un-patchify channels
     // back into (pi, pj) spatial positions
-    public func decode(_ z: MLXArray) -> MLXArray {
+    public func decode(_ z: MLXArray) throws -> MLXArray {
         var z = z
         let origDtype = z.dtype
         if forceUpcast && z.dtype != .float32 {
             z = z.asType(.float32)
         }
-        z = invNormalize(z)
+        z = try invNormalize(z)
         let b = z.dim(0)
         let h = z.dim(1)
         let w = z.dim(2)
         let cp = z.dim(3)
         let (pi, pj) = ps
+        guard pi > 0, pj > 0, cp % (pi * pj) == 0 else {
+            throw Flux2Error.generationFailed(
+                "VAE decode: channel count \(cp) is not divisible by patch area \(pi * pj)")
+        }
         let c = cp / (pi * pj)
         // Un-patchify transpose order
         z = z.reshaped(b, h, w, c, pi, pj)

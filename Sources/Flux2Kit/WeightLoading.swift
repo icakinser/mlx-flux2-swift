@@ -43,10 +43,33 @@ public func convertFlux2DiffusersWeights(_ weights: [String: MLXArray], _ cfg: F
         ("norm_out.linear.weight", "final_layer.adaLN_modulation.1.weight"),
         ("proj_out.weight", "final_layer.linear.weight"),
     ]
+    // These top-level tensors are core architecture weights present in every FLUX.2 diffusers
+    // checkpoint. Requiring them (rather than silently skipping) surfaces a clear, early error that
+    // names the exact missing key, instead of a downstream MLX `keyNotFound` at strict-load time.
     for (src, dst) in rename {
-        if let w = weights[src] {
-            out[dst] = w
+        guard let w = weights[src] else {
+            throw Flux2Error.missingWeights("transformer conversion: missing \(src)")
         }
+        out[dst] = w
+    }
+
+    // 2026-07-26 EDT | PERMANENT (diffusers parity fix) — diffusers' AdaLayerNormContinuous
+    // (`norm_out`) emits [scale, shift] (normalization.py: `scale, shift = chunk(emb, 2)`), while
+    // the BFL-style LastLayer here splits [shift, scale]. The native BFL checkpoint already stores
+    // [shift, scale]; a diffusers checkpoint must have the two row-halves of the projection swapped
+    // or every generated image gets a scale/shift-transposed final modulation (washed-out color,
+    // mottled high-frequency artifacts, structure preserved). Verified against the golden fixture
+    // ref_bike_s42.png.
+    if let normOut = out["final_layer.adaLN_modulation.1.weight"] {
+        let rows = normOut.dim(0)
+        guard rows % 2 == 0 else {
+            throw Flux2Error.missingWeights(
+                "norm_out.linear.weight has odd row count \(rows); cannot swap scale/shift halves")
+        }
+        let half = rows / 2
+        let scaleRows = normOut[0 ..< half]
+        let shiftRows = normOut[half ..< rows]
+        out["final_layer.adaLN_modulation.1.weight"] = concatenated([shiftRows, scaleRows], axis: 0)
     }
 
     for i in 0..<cfg.depth {
@@ -106,7 +129,11 @@ public func convertFlux2DiffusersWeights(_ weights: [String: MLXArray], _ cfg: F
 // MARK: - VAE weight conversion
 
 /// Convert VAE weights from diffusers format.
-public func convertVaeDiffusersWeights(_ weights: [String: MLXArray], _ cfg: VAEConfig? = nil) -> [String: MLXArray] {
+/// Throws `Flux2Error.missingWeights` when a required tensor is absent, so a truncated or wrong
+/// checkpoint fails fast at conversion (naming the missing key) rather than loading partial weights.
+/// Structurally-optional tensors (e.g. `conv_shortcut`, which exists only when a resnet block
+/// changes channel count) remain optional and are copied when present.
+public func convertVaeDiffusersWeights(_ weights: [String: MLXArray], _ cfg: VAEConfig? = nil) throws -> [String: MLXArray] {
     // Use config if provided, otherwise fall back to typical FLUX VAE structure
     let numBlocks: Int
     let numResnetsDown: Int
@@ -123,56 +150,66 @@ public func convertVaeDiffusersWeights(_ weights: [String: MLXArray], _ cfg: VAE
 
     var out: [String: MLXArray] = [:]
 
+    // Required tensor: throws a clear, key-named error when absent.
+    func require(_ src: String, _ dst: String) throws {
+        guard let w = weights[src] else {
+            throw Flux2Error.missingWeights("VAE conversion: missing \(src)")
+        }
+        out[dst] = w
+    }
+
+    // Structurally-optional tensor (e.g. a resnet `conv_shortcut`, present only when the block
+    // changes channel count): copied when present, skipped otherwise.
     func rename(_ src: String, _ dst: String) {
         if let w = weights[src] {
             out[dst] = w
         }
     }
 
-    rename("bn.running_mean", "bn.running_mean")
-    rename("bn.running_var", "bn.running_var")
+    try require("bn.running_mean", "bn.running_mean")
+    try require("bn.running_var", "bn.running_var")
 
-    rename("encoder.conv_in.weight", "encoder.conv_in.weight")
-    rename("encoder.conv_in.bias", "encoder.conv_in.bias")
-    rename("encoder.conv_norm_out.weight", "encoder.norm_out.weight")
-    rename("encoder.conv_norm_out.bias", "encoder.norm_out.bias")
-    rename("encoder.conv_out.weight", "encoder.conv_out.weight")
-    rename("encoder.conv_out.bias", "encoder.conv_out.bias")
+    try require("encoder.conv_in.weight", "encoder.conv_in.weight")
+    try require("encoder.conv_in.bias", "encoder.conv_in.bias")
+    try require("encoder.conv_norm_out.weight", "encoder.norm_out.weight")
+    try require("encoder.conv_norm_out.bias", "encoder.norm_out.bias")
+    try require("encoder.conv_out.weight", "encoder.conv_out.weight")
+    try require("encoder.conv_out.bias", "encoder.conv_out.bias")
 
-    rename("decoder.conv_in.weight", "decoder.conv_in.weight")
-    rename("decoder.conv_in.bias", "decoder.conv_in.bias")
-    rename("decoder.conv_norm_out.weight", "decoder.norm_out.weight")
-    rename("decoder.conv_norm_out.bias", "decoder.norm_out.bias")
-    rename("decoder.conv_out.weight", "decoder.conv_out.weight")
-    rename("decoder.conv_out.bias", "decoder.conv_out.bias")
+    try require("decoder.conv_in.weight", "decoder.conv_in.weight")
+    try require("decoder.conv_in.bias", "decoder.conv_in.bias")
+    try require("decoder.conv_norm_out.weight", "decoder.norm_out.weight")
+    try require("decoder.conv_norm_out.bias", "decoder.norm_out.bias")
+    try require("decoder.conv_out.weight", "decoder.conv_out.weight")
+    try require("decoder.conv_out.bias", "decoder.conv_out.bias")
 
-    rename("quant_conv.weight", "encoder.quant_conv.weight")
-    rename("quant_conv.bias", "encoder.quant_conv.bias")
-    rename("post_quant_conv.weight", "decoder.post_quant_conv.weight")
-    rename("post_quant_conv.bias", "decoder.post_quant_conv.bias")
+    try require("quant_conv.weight", "encoder.quant_conv.weight")
+    try require("quant_conv.bias", "encoder.quant_conv.bias")
+    try require("post_quant_conv.weight", "decoder.post_quant_conv.weight")
+    try require("post_quant_conv.bias", "decoder.post_quant_conv.bias")
 
     // Encoder down blocks
     for i in 0..<numBlocks {
         for j in 0..<numResnetsDown {
             let prefix = "encoder.down_blocks.\(i).resnets.\(j)"
             let dst = "encoder.down.\(i).block.\(j)"
-            rename("\(prefix).conv1.weight", "\(dst).conv1.weight")
-            rename("\(prefix).conv1.bias", "\(dst).conv1.bias")
-            rename("\(prefix).conv2.weight", "\(dst).conv2.weight")
-            rename("\(prefix).conv2.bias", "\(dst).conv2.bias")
-            rename("\(prefix).norm1.weight", "\(dst).norm1.weight")
-            rename("\(prefix).norm1.bias", "\(dst).norm1.bias")
-            rename("\(prefix).norm2.weight", "\(dst).norm2.weight")
-            rename("\(prefix).norm2.bias", "\(dst).norm2.bias")
+            try require("\(prefix).conv1.weight", "\(dst).conv1.weight")
+            try require("\(prefix).conv1.bias", "\(dst).conv1.bias")
+            try require("\(prefix).conv2.weight", "\(dst).conv2.weight")
+            try require("\(prefix).conv2.bias", "\(dst).conv2.bias")
+            try require("\(prefix).norm1.weight", "\(dst).norm1.weight")
+            try require("\(prefix).norm1.bias", "\(dst).norm1.bias")
+            try require("\(prefix).norm2.weight", "\(dst).norm2.weight")
+            try require("\(prefix).norm2.bias", "\(dst).norm2.bias")
             rename("\(prefix).conv_shortcut.weight", "\(dst).nin_shortcut.weight")
             rename("\(prefix).conv_shortcut.bias", "\(dst).nin_shortcut.bias")
         }
         if i != numBlocks - 1 {
-            rename(
+            try require(
                 "encoder.down_blocks.\(i).downsamplers.0.conv.weight",
                 "encoder.down.\(i).downsample.conv.weight"
             )
-            rename(
+            try require(
                 "encoder.down_blocks.\(i).downsamplers.0.conv.bias",
                 "encoder.down.\(i).downsample.conv.bias"
             )
@@ -183,14 +220,14 @@ public func convertVaeDiffusersWeights(_ weights: [String: MLXArray], _ cfg: VAE
     for j in 0..<2 {
         let src = "encoder.mid_block.resnets.\(j)"
         let dst = j == 0 ? "encoder.mid.block_1" : "encoder.mid.block_2"
-        rename("\(src).conv1.weight", "\(dst).conv1.weight")
-        rename("\(src).conv1.bias", "\(dst).conv1.bias")
-        rename("\(src).conv2.weight", "\(dst).conv2.weight")
-        rename("\(src).conv2.bias", "\(dst).conv2.bias")
-        rename("\(src).norm1.weight", "\(dst).norm1.weight")
-        rename("\(src).norm1.bias", "\(dst).norm1.bias")
-        rename("\(src).norm2.weight", "\(dst).norm2.weight")
-        rename("\(src).norm2.bias", "\(dst).norm2.bias")
+        try require("\(src).conv1.weight", "\(dst).conv1.weight")
+        try require("\(src).conv1.bias", "\(dst).conv1.bias")
+        try require("\(src).conv2.weight", "\(dst).conv2.weight")
+        try require("\(src).conv2.bias", "\(dst).conv2.bias")
+        try require("\(src).norm1.weight", "\(dst).norm1.weight")
+        try require("\(src).norm1.bias", "\(dst).norm1.bias")
+        try require("\(src).norm2.weight", "\(dst).norm2.weight")
+        try require("\(src).norm2.bias", "\(dst).norm2.bias")
         rename("\(src).conv_shortcut.weight", "\(dst).nin_shortcut.weight")
         rename("\(src).conv_shortcut.bias", "\(dst).nin_shortcut.bias")
     }
@@ -198,16 +235,16 @@ public func convertVaeDiffusersWeights(_ weights: [String: MLXArray], _ cfg: VAE
     // Encoder mid attention
     let encAttn = "encoder.mid_block.attentions.0"
     let encAttnDst = "encoder.mid.attn_1"
-    rename("\(encAttn).group_norm.weight", "\(encAttnDst).norm.weight")
-    rename("\(encAttn).group_norm.bias", "\(encAttnDst).norm.bias")
-    rename("\(encAttn).to_q.weight", "\(encAttnDst).q.weight")
-    rename("\(encAttn).to_q.bias", "\(encAttnDst).q.bias")
-    rename("\(encAttn).to_k.weight", "\(encAttnDst).k.weight")
-    rename("\(encAttn).to_k.bias", "\(encAttnDst).k.bias")
-    rename("\(encAttn).to_v.weight", "\(encAttnDst).v.weight")
-    rename("\(encAttn).to_v.bias", "\(encAttnDst).v.bias")
-    rename("\(encAttn).to_out.0.weight", "\(encAttnDst).proj_out.weight")
-    rename("\(encAttn).to_out.0.bias", "\(encAttnDst).proj_out.bias")
+    try require("\(encAttn).group_norm.weight", "\(encAttnDst).norm.weight")
+    try require("\(encAttn).group_norm.bias", "\(encAttnDst).norm.bias")
+    try require("\(encAttn).to_q.weight", "\(encAttnDst).q.weight")
+    try require("\(encAttn).to_q.bias", "\(encAttnDst).q.bias")
+    try require("\(encAttn).to_k.weight", "\(encAttnDst).k.weight")
+    try require("\(encAttn).to_k.bias", "\(encAttnDst).k.bias")
+    try require("\(encAttn).to_v.weight", "\(encAttnDst).v.weight")
+    try require("\(encAttn).to_v.bias", "\(encAttnDst).v.bias")
+    try require("\(encAttn).to_out.0.weight", "\(encAttnDst).proj_out.weight")
+    try require("\(encAttn).to_out.0.bias", "\(encAttnDst).proj_out.bias")
 
     // Decoder up blocks — note the index reversal dst_i = num_blocks - 1 - i
     for i in 0..<numBlocks {
@@ -215,23 +252,23 @@ public func convertVaeDiffusersWeights(_ weights: [String: MLXArray], _ cfg: VAE
         for j in 0..<numResnetsUp {
             let src = "decoder.up_blocks.\(i).resnets.\(j)"
             let dst = "decoder.up.\(dstI).block.\(j)"
-            rename("\(src).conv1.weight", "\(dst).conv1.weight")
-            rename("\(src).conv1.bias", "\(dst).conv1.bias")
-            rename("\(src).conv2.weight", "\(dst).conv2.weight")
-            rename("\(src).conv2.bias", "\(dst).conv2.bias")
-            rename("\(src).norm1.weight", "\(dst).norm1.weight")
-            rename("\(src).norm1.bias", "\(dst).norm1.bias")
-            rename("\(src).norm2.weight", "\(dst).norm2.weight")
-            rename("\(src).norm2.bias", "\(dst).norm2.bias")
+            try require("\(src).conv1.weight", "\(dst).conv1.weight")
+            try require("\(src).conv1.bias", "\(dst).conv1.bias")
+            try require("\(src).conv2.weight", "\(dst).conv2.weight")
+            try require("\(src).conv2.bias", "\(dst).conv2.bias")
+            try require("\(src).norm1.weight", "\(dst).norm1.weight")
+            try require("\(src).norm1.bias", "\(dst).norm1.bias")
+            try require("\(src).norm2.weight", "\(dst).norm2.weight")
+            try require("\(src).norm2.bias", "\(dst).norm2.bias")
             rename("\(src).conv_shortcut.weight", "\(dst).nin_shortcut.weight")
             rename("\(src).conv_shortcut.bias", "\(dst).nin_shortcut.bias")
         }
         if i != numBlocks - 1 {
-            rename(
+            try require(
                 "decoder.up_blocks.\(i).upsamplers.0.conv.weight",
                 "decoder.up.\(dstI).upsample.conv.weight"
             )
-            rename(
+            try require(
                 "decoder.up_blocks.\(i).upsamplers.0.conv.bias",
                 "decoder.up.\(dstI).upsample.conv.bias"
             )
@@ -242,14 +279,14 @@ public func convertVaeDiffusersWeights(_ weights: [String: MLXArray], _ cfg: VAE
     for j in 0..<2 {
         let src = "decoder.mid_block.resnets.\(j)"
         let dst = j == 0 ? "decoder.mid.block_1" : "decoder.mid.block_2"
-        rename("\(src).conv1.weight", "\(dst).conv1.weight")
-        rename("\(src).conv1.bias", "\(dst).conv1.bias")
-        rename("\(src).conv2.weight", "\(dst).conv2.weight")
-        rename("\(src).conv2.bias", "\(dst).conv2.bias")
-        rename("\(src).norm1.weight", "\(dst).norm1.weight")
-        rename("\(src).norm1.bias", "\(dst).norm1.bias")
-        rename("\(src).norm2.weight", "\(dst).norm2.weight")
-        rename("\(src).norm2.bias", "\(dst).norm2.bias")
+        try require("\(src).conv1.weight", "\(dst).conv1.weight")
+        try require("\(src).conv1.bias", "\(dst).conv1.bias")
+        try require("\(src).conv2.weight", "\(dst).conv2.weight")
+        try require("\(src).conv2.bias", "\(dst).conv2.bias")
+        try require("\(src).norm1.weight", "\(dst).norm1.weight")
+        try require("\(src).norm1.bias", "\(dst).norm1.bias")
+        try require("\(src).norm2.weight", "\(dst).norm2.weight")
+        try require("\(src).norm2.bias", "\(dst).norm2.bias")
         rename("\(src).conv_shortcut.weight", "\(dst).nin_shortcut.weight")
         rename("\(src).conv_shortcut.bias", "\(dst).nin_shortcut.bias")
     }
@@ -257,16 +294,16 @@ public func convertVaeDiffusersWeights(_ weights: [String: MLXArray], _ cfg: VAE
     // Decoder mid attention
     let decAttn = "decoder.mid_block.attentions.0"
     let decAttnDst = "decoder.mid.attn_1"
-    rename("\(decAttn).group_norm.weight", "\(decAttnDst).norm.weight")
-    rename("\(decAttn).group_norm.bias", "\(decAttnDst).norm.bias")
-    rename("\(decAttn).to_q.weight", "\(decAttnDst).q.weight")
-    rename("\(decAttn).to_q.bias", "\(decAttnDst).q.bias")
-    rename("\(decAttn).to_k.weight", "\(decAttnDst).k.weight")
-    rename("\(decAttn).to_k.bias", "\(decAttnDst).k.bias")
-    rename("\(decAttn).to_v.weight", "\(decAttnDst).v.weight")
-    rename("\(decAttn).to_v.bias", "\(decAttnDst).v.bias")
-    rename("\(decAttn).to_out.0.weight", "\(decAttnDst).proj_out.weight")
-    rename("\(decAttn).to_out.0.bias", "\(decAttnDst).proj_out.bias")
+    try require("\(decAttn).group_norm.weight", "\(decAttnDst).norm.weight")
+    try require("\(decAttn).group_norm.bias", "\(decAttnDst).norm.bias")
+    try require("\(decAttn).to_q.weight", "\(decAttnDst).q.weight")
+    try require("\(decAttn).to_q.bias", "\(decAttnDst).q.bias")
+    try require("\(decAttn).to_k.weight", "\(decAttnDst).k.weight")
+    try require("\(decAttn).to_k.bias", "\(decAttnDst).k.bias")
+    try require("\(decAttn).to_v.weight", "\(decAttnDst).v.weight")
+    try require("\(decAttn).to_v.bias", "\(decAttnDst).v.bias")
+    try require("\(decAttn).to_out.0.weight", "\(decAttnDst).proj_out.weight")
+    try require("\(decAttn).to_out.0.bias", "\(decAttnDst).proj_out.bias")
 
     return out
 }
@@ -423,6 +460,17 @@ public func applyWeights(_ module: Module, _ weights: [String: MLXArray], strict
     try module.update(parameters: ModuleParameters.unflattened(weights), verify: verify)
 }
 
+/// Saturating dtype conversion. bfloat16 shares float32's exponent range (max ~3.4e38) but
+/// float16 caps at 65504; a naive `.asType(.float16)` turns large values into inf → NaN → black
+/// output. Clamping first gives a lossy-but-functional result (identical to PyTorch's saturating
+/// cast semantics).
+private func saturatingCast(_ w: MLXArray, to dtype: DType) -> MLXArray {
+    if dtype == .float16 && w.dtype != .float16 {
+        return clip(w, min: -65504.0, max: 65504.0).asType(.float16)
+    }
+    return w.asType(dtype)
+}
+
 /// Aligns weight shapes/dtypes to the module's parameters, transposing conv weights as needed, then loads them.
 public func alignAndLoad(_ module: Module, _ weights: [String: MLXArray], strict: Bool = true) throws {
     let params = module.parameters().flattened()
@@ -440,7 +488,7 @@ public func alignAndLoad(_ module: Module, _ weights: [String: MLXArray], strict
             }
         }
         if w.dtype != target.dtype {
-            w = w.asType(target.dtype)
+            w = saturatingCast(w, to: target.dtype)
         }
         out[name] = w
     }
@@ -474,7 +522,7 @@ public func alignAndLoadFromTorch(_ module: Module, _ weights: [String: MLXArray
             }
         }
         if w.dtype != target.dtype {
-            w = w.asType(target.dtype)
+            w = saturatingCast(w, to: target.dtype)
         }
         out[name] = w
     }

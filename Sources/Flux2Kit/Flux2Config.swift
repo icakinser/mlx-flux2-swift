@@ -348,5 +348,3 @@ public let defaultOutput = "output.png"
 public let refImageLimitPixelsSingle = 2048 * 2048
 /// REF_IMAGE_LIMIT_PIXELS_MULTI = 1024**2
 public let refImageLimitPixelsMulti = 1024 * 1024
-/// REF_TIME_OFFSET_SCALE
-public let refTimeOffsetScale = 10

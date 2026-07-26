@@ -17,6 +17,8 @@ extension Flux2Pipeline {
         seed: UInt64? = nil, maskFeather: Int = 2,
         verbose: Bool = false, evalFreq: Int = 1
     ) throws -> CGImage {
+        generationLock.lock()
+        defer { generationLock.unlock() }
         let sw = source.width
         let sh = source.height
         let l = max(0, left), t = max(0, top)

@@ -16,7 +16,20 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Cache SwiftPM
+      uses: actions/cache@v4
+      with:
+        path: .build
+        key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
+        restore-keys: |
+          ${{ runner.os }}-spm-
     - name: Build
       run: swift build -v
     - name: Run tests
+      # FLUX2_RUN_MLX_TESTS enables the CPU-pinned MLX math tests (schedule, blend, color, mask,
+      # quant filter). They bind their ops to Device(.cpu), so they need no Metal shader library and
+      # run under a plain `swift test`. The tokenizer golden tests still self-skip unless FLUX2_REPO
+      # points at a snapshot on disk.
+      env:
+        FLUX2_RUN_MLX_TESTS: "1"
       run: swift test -v

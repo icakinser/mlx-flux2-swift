@@ -7,24 +7,57 @@
 // small tiles). Use only when a large image would otherwise exhaust memory; larger tiles + overlap
 // reduce the artifacts. It is never auto-enabled — the caller must set `vaeTileLatent`.
 
+import CoreGraphics
 import Foundation
 import MLX
 
 extension Flux2Pipeline {
 
-    /// Decode `x` (NHWC latent) — tiled when `vaeTileLatent` is set and the latent exceeds it,
-    /// otherwise a single `vae.decode`.
-    func decodeMaybeTiled(_ x: MLXArray) -> MLXArray {
-        if let tile = vaeTileLatent, x.ndim == 4, x.dim(1) > tile || x.dim(2) > tile {
-            return decodeTiled(x, tileLatent: tile, overlap: max(2, tile / 4))
+    /// Shared final stage for the editing entry points (img2img / inpaint): reassemble the denoised
+    /// canvas tokens into an NHWC latent, free the transformer, ensure the VAE is resident, and decode
+    /// to an image. `generate` keeps its own instrumented copy that records per-stage timings.
+    ///
+    /// The MLX ops here are identical to the previously-inlined blocks, so decode output is unchanged.
+    func scatterAndDecodeToImage(_ x: MLXArray, xIds: MLXArray) throws -> CGImage {
+        var latent = concatenated(scatterIds(x, xIds), axis: 0)
+        if latent.dim(2) == 1 {
+            latent = latent.squeezed(axis: 2)
+        } else {
+            latent = latent[0..., 0..., 0, 0..., 0...]
         }
-        return vae.decode(x)
+        latent = latent.transposed(0, 2, 3, 1)
+        eval(latent)
+
+        unloadTransformer()
+        try ensureVAE()
+        reportMemory("pre-decode")
+        let decoded = try decodeMaybeTiled(latent)
+        eval(decoded)
+        return try arrayToCGImage(decoded[0])
+    }
+
+    /// Decode `x` (NHWC latent) — tiled when `vaeTileLatent` is set (and positive) and the latent
+    /// exceeds it, otherwise a single `vae.decode`.
+    func decodeMaybeTiled(_ x: MLXArray) throws -> MLXArray {
+        let vae = try requireVAE()
+        // Parenthesize the size test so a future single-expression refactor can't accidentally drop
+        // the ndim guard from the `||` branch.
+        if let tile = vaeTileLatent, tile > 0, x.ndim == 4, (x.dim(1) > tile || x.dim(2) > tile) {
+            return try decodeTiled(x, tileLatent: tile, overlap: max(2, tile / 4))
+        }
+        return try vae.decode(x)
     }
 
     /// Overlapping-tile decode of a `(1, HL, WL, C)` latent with feather blending.
-    func decodeTiled(_ latents: MLXArray, tileLatent: Int, overlap: Int) -> MLXArray {
+    func decodeTiled(_ latents: MLXArray, tileLatent: Int, overlap: Int) throws -> MLXArray {
+        let vae = try requireVAE()
         let hL = latents.dim(1)
         let wL = latents.dim(2)
+        // Degenerate or non-positive-tile inputs cannot be tiled; fall back to a single decode
+        // (a zero/negative tile would make the stride 1 with empty slices → infinite loop).
+        guard hL > 0, wL > 0, tileLatent > 0 else {
+            return try vae.decode(latents)
+        }
         let step = max(1, tileLatent - overlap)
 
         var ff = 0
@@ -39,7 +72,7 @@ extension Flux2Pipeline {
                 let lx1 = min(lx + tileLatent, wL)
 
                 let tile = latents[0..., ly ..< ly1, lx ..< lx1, 0...]
-                let dec = vae.decode(tile)  // (1, th, tw, 3)
+                let dec = try vae.decode(tile)  // (1, th, tw, 3)
                 eval(dec)
 
                 if ff == 0 {
@@ -66,7 +99,11 @@ extension Flux2Pipeline {
             }
             ly += step
         }
-        return accum! / MLX.maximum(wsum!, MLXArray(Float(1e-6)))
+        // accum/wsum are assigned on the first tile; the guards above ensure at least one tile runs.
+        guard let accum, let wsum else {
+            throw Flux2Error.generationFailed("tiled decode produced no tiles")
+        }
+        return accum / MLX.maximum(wsum, MLXArray(Float(1e-6)))
     }
 }
 

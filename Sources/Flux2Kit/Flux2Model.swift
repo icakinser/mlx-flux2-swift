@@ -72,16 +72,30 @@ public final class SiLUActivation: Module, UnaryLayer {
     }
 }
 
-// The freqs tensor is cached in a module-global
-// dict; recomputation here is numerically identical (perf-only deviation, ~64 values per call).
-public func timestepEmbedding(
-    _ t: MLXArray, _ dim: Int, maxPeriod: Int = 10000, timeFactor: Float = 1000.0
-) -> MLXArray {
-    let t1 = t * timeFactor
+// The position-independent `freqs` vector depends only on (dim, maxPeriod), so it is computed once
+// per (dim, maxPeriod) and cached. Reusing the same constant node is numerically identical to
+// recomputing it; the cache just removes a per-call `exp`/`arange` from the denoise hot loop.
+private let timestepFreqsLock = NSLock()
+nonisolated(unsafe) private var timestepFreqsCache: [String: MLXArray] = [:]
+
+private func timestepFreqs(_ dim: Int, _ maxPeriod: Int) -> MLXArray {
+    let key = "\(dim)_\(maxPeriod)"
+    timestepFreqsLock.lock()
+    defer { timestepFreqsLock.unlock() }
+    if let cached = timestepFreqsCache[key] { return cached }
     let half = dim / 2
     let freqs = exp(
         -log(Float(maxPeriod)) * MLXArray(0 ..< half).asType(.float32) / Float(half)
     )
+    timestepFreqsCache[key] = freqs
+    return freqs
+}
+
+public func timestepEmbedding(
+    _ t: MLXArray, _ dim: Int, maxPeriod: Int = 10000, timeFactor: Float = 1000.0
+) -> MLXArray {
+    let t1 = t * timeFactor
+    let freqs = timestepFreqs(dim, maxPeriod)
     let args = t1[0..., .newAxis].asType(.float32) * freqs[.newAxis]
     var emb = concatenated([cos(args), sin(args)], axis: -1)
     if dim % 2 != 0 {
