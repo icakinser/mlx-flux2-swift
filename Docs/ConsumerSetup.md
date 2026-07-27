@@ -2,9 +2,13 @@
 
 ## 1. Add the package
 
+Pin to a released tag (recommended):
+
 ```swift
 dependencies: [
-    .package(url: "https://github.com/icakinser/mlx-flux2-swift.git", branch: "main")
+    .package(
+        url: "https://github.com/icakinser/mlx-flux2-swift.git",
+        .upToNextMinor(from: "0.1.0"))
 ],
 targets: [
     .executableTarget(
@@ -13,7 +17,8 @@ targets: [
 ]
 ```
 
-For local development, use `.package(path: "../mlx-flux2-swift")`.
+For local development, use `.package(path: "../mlx-flux2-swift")`. Prefer a version range over
+`branch: "main"` so apps do not track an unstable tip.
 
 ## 2. Build the consumer
 
@@ -45,7 +50,7 @@ Point your application at a local FLUX.2 [klein] diffusers snapshot and initiali
 
 - Apple Silicon macOS
 - macOS 14+
-- Xcode 26 / Swift 6.2
+- Xcode 26 / Swift 6.2 (required to build the MLX Metal shader library)
 - Pinned `mlx-swift` and `swift-transformers` revisions in `Package.swift`
 
 Dependency revisions are intentionally pinned. Upgrade them only with the full unit suite, image

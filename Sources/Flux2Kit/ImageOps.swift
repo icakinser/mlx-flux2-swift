@@ -27,7 +27,7 @@ public enum FlipMode: String, Sendable, CaseIterable {
 }
 
 /// A single model-free operation. `applyImageOps` runs a list in order.
-public enum ImageOp {
+public enum ImageOp: Sendable {
     case resize(Int, Int)
     case scale(Float)
     case crop(Int, Int, Int, Int)

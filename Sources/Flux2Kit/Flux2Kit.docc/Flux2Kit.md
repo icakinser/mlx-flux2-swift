@@ -34,6 +34,7 @@ accept ``DenoiseOptions`` through ``ImageToImageOptions``, ``InpaintOptions``, a
 - ``Flux2Pipeline``
 - ``PipelineConfiguration``
 - ``ResidencyPolicy``
+- ``Flux2Error``
 
 ### Generation
 
@@ -49,10 +50,29 @@ accept ``DenoiseOptions`` through ``ImageToImageOptions``, ``InpaintOptions``, a
 - ``ImageToImageOptions``
 - ``InpaintOptions``
 - ``OutpaintOptions``
+- ``Flux2Pipeline/recolor``
+- ``Flux2Pipeline/applyPixelFilter``
 
 ### Image utilities
 
 - ``ImageOp``
-- ``applyImageOps(_:_:)``
+- ``FlipMode``
+- ``applyImageOps(_:_:mask:invertMask:maskFeather:)``
 - ``loadImages(_:)``
+- ``savePNG(_:to:)``
 - ``saveImage(_:to:format:quality:)``
+- ``resizeHighQuality(_:width:height:)``
+
+### Masks
+
+- ``makeBoxMask(width:height:x:y:boxWidth:boxHeight:)``
+- ``makeEllipseMask(width:height:x:y:boxWidth:boxHeight:)``
+- ``dilateMask(_:iterations:)``
+- ``erodeMask(_:iterations:)``
+
+### Weights
+
+- ``downloadFluxSnapshot(repoId:revision:hfToken:progress:)``
+- ``weightsHelpMessage(repoId:)``
+- ``defaultRepoId``
+- ``WeightDownloadError``

@@ -12,9 +12,10 @@ public API an application uses.
 - Text-to-image, img2img, inpaint, outpaint, and editing methods on `Flux2Pipeline`
 - `ImageOp`, `FlipMode`, `applyImageOps` (optional `mask` / `invertMask` / `maskFeather`)
 - `Flux2Pipeline.recolor` and `applyPixelFilter` (pixel path; mask-scoped)
+- `makeBoxMask`, `makeEllipseMask`, `dilateMask`, `erodeMask`
 - Image loading, saving, and `resizeHighQuality`
 - `Flux2Error`
-- Model download helpers
+- Model download helpers (`downloadFluxSnapshot`, `weightsHelpMessage`)
 
 Transformer, VAE, text-encoder, MLX conversion/math, weight conversion, denoise, memory, and CLI
 implementation details are package-scoped.

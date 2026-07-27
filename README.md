@@ -161,15 +161,16 @@ Flags:
 import Flux2Kit
 
 let pipeline = try await Flux2Pipeline(
-    repoPath: URL(fileURLWithPath: "/path/to/Models/FLUX-2"),
-    dtype: "bfloat16")
+    configuration: PipelineConfiguration(
+        repoPath: URL(fileURLWithPath: "/path/to/Models/FLUX-2"),
+        residency: .keepResident))
 
-let image = try pipeline.generate(
+var options = GenerationOptions(
     prompt: "a red bicycle leaning on a brick wall",
     width: 512, height: 512,
     numSteps: 4, guidance: 1.0, seed: 42,
     sampler: .euler)  // or .heun
-// Or: try pipeline.generate(GenerationOptions(prompt: "…", numSteps: 4, guidance: 1.0))
+let image = try pipeline.generate(options)
 ```
 
 A runnable sample project lives in [`Examples/Flux2KitExample`](Examples/Flux2KitExample) — it depends

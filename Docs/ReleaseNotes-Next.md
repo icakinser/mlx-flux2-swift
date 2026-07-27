@@ -1,4 +1,6 @@
-# Flux2Kit — Next Release
+# Flux2Kit — 0.1.0
+
+**Date:** 2026-07-27
 
 ## Highlights
 
@@ -8,6 +10,9 @@
 - New `PipelineConfiguration`, `DenoiseOptions`, `ImageToImageOptions`, `InpaintOptions`, and
   `OutpaintOptions` provide a compact application API.
 - `GenerationCancellation` supports cooperative cancellation between denoise steps.
+- Model-free `applyImageOps` / pixel filters accept an optional mask (white = apply); CLI
+  `--mask*` scopes color/effect ops the same way. `--recolor` with `-p` and a mask runs semantic
+  diffusion recolor via the library API.
 - The image quality matrix now covers Euler, Heun, compile, img2img, inpaint, outpaint, and single-
   and multi-reference conditioning.
 - Points-of-interest signposts expose generation stages and individual denoise steps in Instruments.
