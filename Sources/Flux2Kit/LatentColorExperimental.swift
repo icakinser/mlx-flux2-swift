@@ -46,7 +46,7 @@ extension Flux2Pipeline {
         }
         try ensureVAE()
         let vae = try requireVAE()
-        let resized = try resizeExactRGB(source, width: width, height: height)
+        let resized = try resizeHighQuality(source, width: width, height: height)
         let srcArray = try cgImageToArray(resized)
         let latents = try vae.encode(expandedDimensions(srcArray, axis: 0)).asType(dtype)
         let adjusted = applyLatentCurve(

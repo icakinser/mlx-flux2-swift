@@ -82,10 +82,10 @@ public func applyImageOps(_ source: CGImage, _ ops: [ImageOp]) throws -> CGImage
         switch op {
         case .resize(let w, let h):
             try flush()
-            img = try resizeExactRGB(img, width: max(1, w), height: max(1, h))
+            img = try resizeHighQuality(img, width: max(1, w), height: max(1, h))
         case .scale(let f):
             try flush()
-            img = try resizeExactRGB(
+            img = try resizeHighQuality(
                 img, width: max(1, Int(Float(img.width) * f)),
                 height: max(1, Int(Float(img.height) * f)))
         case .crop(let x, let y, let w, let h):
@@ -186,7 +186,7 @@ func pixelateImage(_ img: CGImage, block: Int) throws -> CGImage {
     let b = max(2, block)
     let w = img.width
     let h = img.height
-    let small = try resizeExactRGB(img, width: max(1, w / b), height: max(1, h / b))
+    let small = try resizeHighQuality(img, width: max(1, w / b), height: max(1, h / b))
     // Upscale back with nearest-neighbor for the blocky look.
     guard
         let ctx = CGContext(

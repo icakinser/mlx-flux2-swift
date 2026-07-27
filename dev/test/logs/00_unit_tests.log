@@ -1,0 +1,68 @@
+[1/1] Compiling plugin CudaBuild
+[2/2] Compiling plugin GenerateManual
+[3/3] Compiling plugin GenerateDoccReference
+Building for debugging...
+[3/7] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.19s)
+Test Suite 'All tests' started at 2026-07-26 19:39:21.169.
+Test Suite 'All tests' passed at 2026-07-26 19:39:21.170.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+➜ Test hsvRoundTrip() skipped.
+◇ Test resolveShardPathsFallbackGlob() started.
+➜ Test specialTokenIdsMatchGolden() skipped.
+➜ Test matchColorMovesMean() skipped.
+➜ Test boxMaskCoverage() skipped.
+➜ Test pixelFilterBasics() skipped.
+➜ Test vaeConversionThrowsOnMissingKey() skipped.
+➜ Test transformerConversionSwapsNormOutHalves() skipped.
+➜ Test chatTemplateMatchesReferenceRender() skipped.
+➜ Test tokenIdsMatchGolden() skipped.
+➜ Test cgImageToArrayKnownValues() skipped.
+➜ Test transformerConversionMapsRenameKeys() skipped.
+➜ Test featherRampShape() skipped.
+◇ Test imageOpsGeometry() started.
+◇ Test rotateInvalidDegreesThrows() started.
+➜ Test applyImageOpsFusedChain() skipped.
+◇ Test resolveShardPathsWithIndex() started.
+➜ Test imageRoundTripStable() skipped.
+➜ Test quantFilterSelectsBigLinears() skipped.
+➜ Test effectsBasics() skipped.
+➜ Test resizeHighQualityDimensions() skipped.
+◇ Test cliTupleParsers() started.
+➜ Test colorCurvesClosedForm() skipped.
+◇ Test cliRecolorParserWarnings() started.
+◇ Test cliNumericParsersStrict() started.
+➜ Test scheduleRescaleIntoStrengthWindow() skipped.
+➜ Test dilateErodeChangeArea() skipped.
+◇ Test saveImageRejectsUnsupportedFormat() started.
+◇ Test memoryLimitsRejectNonPositive() started.
+◇ Test transformerConversionThrowsOnMissingRename() started.
+◇ Test resolveShardPathsMissingShard() started.
+➜ Test boxBlurFeatherProperties() skipped.
+➜ Test maskTokensFollowRasterOrder() skipped.
+➜ Test blendBroadcastsOverCfgBatch() skipped.
+◇ Test vaeConversionThrowsOnEmpty() started.
+◇ Test capMinPixelsRejectsBadImages() started.
+◇ Test weightsHelpMentionsDownload() started.
+◇ Test memoryLimitsAcceptPositive() started.
+◇ Test cliSeedsListStrict() started.
+✔ Test cliRecolorParserWarnings() passed after 0.001 seconds.
+✔ Test cliNumericParsersStrict() passed after 0.001 seconds.
+✔ Test memoryLimitsRejectNonPositive() passed after 0.001 seconds.
+✔ Test cliSeedsListStrict() passed after 0.001 seconds.
+✔ Test cliTupleParsers() passed after 0.001 seconds.
+✔ Test transformerConversionThrowsOnMissingRename() passed after 0.001 seconds.
+✔ Test weightsHelpMentionsDownload() passed after 0.001 seconds.
+✔ Test vaeConversionThrowsOnEmpty() passed after 0.001 seconds.
+✔ Test resolveShardPathsFallbackGlob() passed after 0.002 seconds.
+✔ Test resolveShardPathsMissingShard() passed after 0.002 seconds.
+✔ Test resolveShardPathsWithIndex() passed after 0.002 seconds.
+✔ Test saveImageRejectsUnsupportedFormat() passed after 0.002 seconds.
+✔ Test capMinPixelsRejectsBadImages() passed after 0.002 seconds.
+✔ Test rotateInvalidDegreesThrows() passed after 0.002 seconds.
+✔ Test imageOpsGeometry() passed after 0.003 seconds.
+✔ Test memoryLimitsAcceptPositive() passed after 0.008 seconds.
+✔ Test run with 39 tests in 0 suites passed after 0.009 seconds.

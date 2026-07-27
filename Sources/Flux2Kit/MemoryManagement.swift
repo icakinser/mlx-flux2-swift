@@ -30,8 +30,14 @@ public func flux2QuantFilter(groupSize: Int) -> (String, Module) -> Bool {
 }
 
 /// Quantize a module in place using the FLUX filter. No-op unless `mode` is "int8"/"int4".
+// 2026-07-26 EDT | PERMANENT — surface unrecognized quantize modes
 public func quantizeModule(_ module: Module, mode: String?, groupSize: Int = 64) {
-    guard let mode, mode == "int8" || mode == "int4" else { return }
+    guard let mode else { return }
+    guard mode == "int8" || mode == "int4" else {
+        FileHandle.standardError.write(
+            Data("Warning: unrecognized quantize mode '\(mode)', skipping quantization\n".utf8))
+        return
+    }
     let bits = mode == "int8" ? 8 : 4
     MLXNN.quantize(
         model: module, groupSize: groupSize, bits: bits,
@@ -39,9 +45,20 @@ public func quantizeModule(_ module: Module, mode: String?, groupSize: Int = 64)
 }
 
 /// Apply MLX buffer-cache / soft memory limits, in megabytes. `nil` leaves MLX defaults.
-public func applyMemoryLimits(cacheLimitMB: Int?, memoryLimitMB: Int?) {
-    if let c = cacheLimitMB { MLX.Memory.cacheLimit = c * 1_048_576 }
-    if let m = memoryLimitMB { MLX.Memory.memoryLimit = m * 1_048_576 }
+// 2026-07-26 EDT | PERMANENT — reject nonsensical memory limits
+public func applyMemoryLimits(cacheLimitMB: Int?, memoryLimitMB: Int?) throws {
+    if let c = cacheLimitMB {
+        guard c > 0 else {
+            throw Flux2Error.configMissing("cacheLimitMB must be positive (got \(c))")
+        }
+        MLX.Memory.cacheLimit = c * 1_048_576
+    }
+    if let m = memoryLimitMB {
+        guard m > 0 else {
+            throw Flux2Error.configMissing("memoryLimitMB must be positive (got \(m))")
+        }
+        MLX.Memory.memoryLimit = m * 1_048_576
+    }
 }
 
 /// Process resident set size (bytes) — the true footprint, including mmap'd weight pages that MLX's

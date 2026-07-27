@@ -1,0 +1,1 @@
+error: configMissing("cacheLimitMB must be positive (got -1)")

@@ -54,7 +54,7 @@ extension Flux2Pipeline {
         if strength <= 0.0 {
             try ensureVAE()
             let vae = try requireVAE()
-            let resized = try resizeExactRGB(source, width: width, height: height)
+            let resized = try resizeHighQuality(source, width: width, height: height)
             let sourceArray = try cgImageToArray(resized)
             let latents = try vae.encode(expandedDimensions(sourceArray, axis: 0)).asType(dtype)
             let decoded = try decodeMaybeTiled(latents)
@@ -81,7 +81,7 @@ extension Flux2Pipeline {
         }
 
         // Source latents at the output geometry (identical to img2img).
-        let resized = try resizeExactRGB(source, width: width, height: height)
+        let resized = try resizeHighQuality(source, width: width, height: height)
         let sourceArray = try cgImageToArray(resized)  // (H, W, 3) in [-1, 1]
         let sourceLatents = try vae.encode(expandedDimensions(sourceArray, axis: 0))
             .transposed(0, 3, 1, 2)
@@ -216,4 +216,4 @@ func boxBlur(_ grid: MLXArray, passes: Int) -> MLXArray {
     return m
 }
 
-// (resizeExactRGB now lives in ImageIO.swift as the single canonical resize.)
+// (resizeHighQuality now lives in ImageIO.swift as the single canonical resize.)

@@ -46,6 +46,7 @@ struct Flux2KitCLI {
         var dtype = defaultDtype
         var vaeFp16 = false
         var safeAttn = false
+        var useCompileFlag = false
         var verbose = false
         var evalFreq = 1
 
@@ -81,6 +82,9 @@ struct Flux2KitCLI {
         var numImages = 1
         var seedsList: [UInt64]?
         var format = "png"
+        var upscale = 1
+        var sampler = Sampler.euler
+        var quality = 0.92
 
         // Weight download.
         var doDownload = false
@@ -126,6 +130,7 @@ struct Flux2KitCLI {
             case "--dtype": dtype = next(arg) ?? dtype
             case "--vae-fp16": vaeFp16 = true
             case "--safe-attn": safeAttn = true
+            case "--compile": useCompileFlag = true
             case "-v", "--verbose": verbose = true
             case "--eval-freq": evalFreq = intArg()
             // Memory system.
@@ -169,10 +174,28 @@ struct Flux2KitCLI {
             case "--match-color": ops.append(.matchColor(next(arg) ?? ""))
             case "--num": numImages = max(1, intArg())
             case "--seeds":
-                seedsList = (next(arg) ?? "").split(separator: ",").compactMap {
-                    UInt64($0.trimmingCharacters(in: .whitespaces))
+                // 2026-07-26 EDT | PERMANENT — strict seed parsing, no silent drops
+                let rawSeeds = (next(arg) ?? "").split(separator: ",").map {
+                    $0.trimmingCharacters(in: .whitespaces)
                 }
+                var parsed: [UInt64] = []
+                for entry in rawSeeds {
+                    do {
+                        parsed.append(try parseUInt64Arg("--seeds", entry))
+                    } catch {
+                        fail("--seeds: invalid seed value '\(entry)'")
+                    }
+                }
+                seedsList = parsed
             case "--format": format = next(arg) ?? format
+            case "--upscale": upscale = intArg()
+            case "--sampler":
+                let raw = next(arg) ?? "euler"
+                guard let s = Sampler(rawValue: raw) else {
+                    fail("--sampler must be euler or heun, got: \(raw)")
+                }
+                sampler = s
+            case "--quality": quality = doubleArg()
             // Weight download.
             case "--download": doDownload = true
             case "--download-repo": downloadRepoId = next(arg) ?? downloadRepoId
@@ -196,7 +219,8 @@ struct Flux2KitCLI {
                     flux2kit-cli -p PROMPT [-w W] [-H H] [-t STEPS] [--guidance G] [-s SEED]
                                  [--output OUT.png] [--repo PATH] [--input REF.png ...]
                                  [-q none|int8|int4] [--dtype bfloat16]
-                                 [--vae-fp16] [--safe-attn] [-v] [--eval-freq N]
+                                 [--vae-fp16] [--safe-attn] [--compile] [-v] [--eval-freq N]
+                                 [--sampler euler|heun]
 
                   editing (require --source; inpaint modes also require --mask;
                            mask convention: white = region to edit, black = keep):
@@ -227,6 +251,10 @@ struct Flux2KitCLI {
                     --num N            emit N variations (seeds SEED, SEED+1, …)
                     --seeds a,b,c      explicit seed list
                     --format png|jpg   output format
+                    --upscale N        upscale output by integer factor N (1-8, default 1)
+                    --sampler S        denoising integrator: euler (default) or heun (2x passes,
+                                       smoother low-step output)
+                    --quality F        JPEG quality 0.0-1.0 (default 0.92; ignored for PNG)
 
                   editing options: --strength F  --invert-mask  --mask-feather N  [-s SEED]
 
@@ -238,6 +266,7 @@ struct Flux2KitCLI {
 
                   memory:
                     -q int8|int4          quantize the transformer + text encoder
+                    --compile             enable mx.compile for 30-50% per-step speedup after warmup
                     --low-memory          preset: int4 + free each model after its stage + fp16 VAE
                     --mem-report          print per-stage RSS / MLX active / peak memory
                     --cache-limit MB      cap the MLX buffer cache
@@ -269,6 +298,12 @@ struct Flux2KitCLI {
         }
         if let q = quantize, q != "int8", q != "int4" {
             fail("--quantize must be none, int8, or int4, got: \(q)")
+        }
+        guard upscale >= 1, upscale <= 8 else {
+            fail("--upscale must be 1-8, got: \(upscale)")
+        }
+        guard quality >= 0.0, quality <= 1.0 else {
+            fail("--quality must be 0.0-1.0, got: \(quality)")
         }
         let outputDir = URL(fileURLWithPath: output).deletingLastPathComponent()
         if !outputDir.path.isEmpty,
@@ -329,7 +364,7 @@ struct Flux2KitCLI {
                 let out = try applyImageOps(src, ops)
                 let url = URL(
                     fileURLWithPath: "\((output as NSString).deletingPathExtension).\(format)")
-                try saveImage(out, to: url, format: format)
+                try saveImage(out, to: url, format: format, quality: quality)
                 print("Saved \(url.path)")
             } catch {
                 FileHandle.standardError.write(Data("error: \(error)\n".utf8))
@@ -339,12 +374,26 @@ struct Flux2KitCLI {
         }
 
         // Seeds to run (multi-seed batch). Deterministic ops collapse to one below.
+        // 2026-07-26 EDT | PERMANENT — deterministic-per-run seeding for reproducibility
         let seeds: [UInt64?]
-        if let seedsList { seeds = seedsList.map { Optional($0) } }
-        else if numImages > 1 {
-            let base = seed ?? 0
+        if let seedsList {
+            seeds = seedsList.map { Optional($0) }
+        } else if let seed {
+            // Explicit base seed: derive a contiguous run.
+            seeds = (0 ..< numImages).map { Optional(seed + UInt64($0)) }
+        } else {
+            // No seed supplied: draw a fresh random base so each unseeded run is independent,
+            // then surface it so the result is reproducible by re-passing -s.
+            let base = UInt64.random(in: 0 ... UInt64.max)
+            if verbose {
+                if numImages > 1 {
+                    print("Using random base seed: \(base) (seeds \(base)...\(base + UInt64(numImages - 1)))")
+                } else {
+                    print("Using seed: \(base)")
+                }
+            }
             seeds = (0 ..< numImages).map { Optional(base + UInt64($0)) }
-        } else { seeds = [seed] }
+        }
 
         do {
             let loadStart = ProcessInfo.processInfo.systemUptime
@@ -354,6 +403,7 @@ struct Flux2KitCLI {
                 quantize: quantize,
                 safeAttn: safeAttn,
                 vaeFp16: vaeFp16,
+                compile: useCompileFlag,
                 residency: residency,
                 cacheLimitMB: cacheLimitMB,
                 memoryLimitMB: memoryLimitMB,
@@ -470,7 +520,8 @@ struct Flux2KitCLI {
                 }
                 return try pipeline.generate(
                     prompt: p, width: width, height: height, numSteps: steps, guidance: guidance,
-                    seed: curSeed, inputImages: refImages, verbose: verbose, evalFreq: evalFreq)
+                    seed: curSeed, inputImages: refImages, verbose: verbose, evalFreq: evalFreq,
+                    sampler: sampler)
             }
 
             // experimental-latent is deterministic → a single output.
@@ -479,9 +530,13 @@ struct Flux2KitCLI {
             for (i, s) in runSeeds.enumerated() {
                 var img = try runOnce(s)
                 if !ops.isEmpty { img = try applyImageOps(img, ops) }  // model-free post-processing
+                // 2026-07-26 EDT | PERMANENT — Lanczos-equivalent upscale for game asset workflows
+                if upscale > 1 {
+                    img = try resizeHighQuality(img, width: img.width * upscale, height: img.height * upscale)
+                }
                 let name = runSeeds.count > 1 ? "\(base)_\(i).\(format)" : "\(base).\(format)"
                 let url = URL(fileURLWithPath: name)
-                try saveImage(img, to: url, format: format)
+                try saveImage(img, to: url, format: format, quality: quality)
                 print("Saved \(url.path)")
             }
         } catch {

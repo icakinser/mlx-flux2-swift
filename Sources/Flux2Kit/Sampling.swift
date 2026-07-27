@@ -35,6 +35,14 @@ public final class Flux2StepTimes {
     public init() { self.values = [] }
 }
 
+/// Denoising integrator. `euler` is the parity-locked default (one forward pass per step).
+/// `heun` is an additive second-order corrector that trades 2x forward passes for smoother
+/// low-step output; it is opt-in and never changes the Euler path.
+public enum Sampler: String, Sendable {
+    case euler
+    case heun
+}
+
 // MARK: - Schedule
 
 // Generalized time-dependent SNR shift.
@@ -331,6 +339,102 @@ public func denoise(
         // Pre-cast dt to model dtype to avoid potential float64 promotion
         // mx.array(t_prev - t_curr, dtype=img.dtype), double→dtype in one cast
         let dt = (tPrev - tCurr).asMLXArray(dtype: img.dtype)
+        img = img + dt * pred
+        if let postStep { img = postStep(step, tPrev, img) }
+        if evalFreq <= 1 || (step + 1) % evalFreq == 0 || step == numSteps - 1 {
+            MLX.eval(img)
+        }
+        let stepTime = ProcessInfo.processInfo.systemUptime - stepStart
+        if let stepTimes {
+            stepTimes.values.append(stepTime)
+        }
+        if let logFn {
+            logFn(step, tCurr, tPrev, img, pred)
+        }
+    }
+    return img
+}
+
+// 2026-07-26 EDT | PERMANENT — Heun-2 corrector for improved low-step quality
+/// Heun (improved Euler / explicit trapezoid) integrator for the distilled guidance path. Same
+/// signature and setup as `denoise`, but each step performs a predictor (Euler) forward pass plus a
+/// corrector forward pass at `tPrev` using the Euler-predicted latent, then averages the two
+/// velocities. This doubles the forward passes per step in exchange for smoother output at low step
+/// counts. The `postStep` hook fires after the corrected update, matching `denoise`.
+public func denoiseHeun(
+    _ model: Flux2Transformer,
+    _ img: MLXArray,
+    _ imgIds: MLXArray,
+    _ txt: MLXArray,
+    _ txtIds: MLXArray,
+    timesteps: [Double],
+    guidance: Double,
+    imgCondSeq: MLXArray? = nil,
+    imgCondSeqIds: MLXArray? = nil,
+    logFn: ((Int, Double, Double, MLXArray, MLXArray) -> Void)? = nil,
+    peX: MLXArray? = nil,
+    peCtx: MLXArray? = nil,
+    modelFn: Flux2ModelFn? = nil,
+    stepTimes: Flux2StepTimes? = nil,
+    txtEmbedded: MLXArray? = nil,
+    guidanceEmbedded: MLXArray? = nil,
+    evalFreq: Int = 1,
+    postStep: ((Int, Double, MLXArray) -> MLXArray)? = nil
+) -> MLXArray {
+    var img = img
+    let modelFn = modelFn ?? { x, xIds, t, ctx, ctxIds, g, pX, pCtx, txtEmb, gEmb in
+        model(x, xIds, t, ctx, ctxIds, g, pX, pCtx, txtEmb, gEmb)
+    }
+    let guidanceVec = MLX.full([img.dim(0)], values: guidance.asMLXArray(dtype: img.dtype), dtype: img.dtype)
+    let imgInputIds: MLXArray
+    if imgCondSeq != nil, let imgCondSeqIds {
+        imgInputIds = MLX.concatenated([imgIds, imgCondSeqIds], axis: 1)
+    } else {
+        imgInputIds = imgIds
+    }
+    let peX = peX ?? model.peEmbedder(imgInputIds)
+    let peCtx = peCtx ?? model.peEmbedder(txtIds)
+    let txtEmbedded = txtEmbedded ?? model.embedTxt(txt)
+    var guidanceEmbedded = guidanceEmbedded
+    if guidanceEmbedded == nil && model.useGuidanceEmbed {
+        guidanceEmbedded = model.embedGuidance(guidanceVec)
+    }
+    let numSteps = timesteps.count - 1
+    for (step, (tCurr, tPrev)) in zip(timesteps.dropLast(), timesteps.dropFirst()).enumerated() {
+        let stepStart = ProcessInfo.processInfo.systemUptime
+        let tVec = MLX.full([img.dim(0)], values: tCurr.asMLXArray(dtype: img.dtype), dtype: img.dtype)
+        var imgInput = img
+        if let imgCondSeq {
+            imgInput = MLX.concatenated([imgInput, imgCondSeq], axis: 1)
+        }
+        // Predictor velocity at tCurr.
+        var pred1 = modelFn(
+            imgInput, imgInputIds, tVec, txt, txtIds, guidanceVec, peX, peCtx, txtEmbedded,
+            guidanceEmbedded)
+        if imgCondSeq != nil { pred1 = pred1[0..., ..<img.dim(1)] }
+        let dt = (tPrev - tCurr).asMLXArray(dtype: img.dtype)
+        // Euler-predicted latent at tPrev.
+        let imgEuler = img + dt * pred1
+
+        // Corrector velocity at tPrev, evaluated on the Euler-predicted latent.
+        var pred2: MLXArray
+        if step < numSteps - 1 {
+            let tPrevVec = MLX.full(
+                [img.dim(0)], values: tPrev.asMLXArray(dtype: img.dtype), dtype: img.dtype)
+            var imgEulerInput = imgEuler
+            if let imgCondSeq {
+                imgEulerInput = MLX.concatenated([imgEulerInput, imgCondSeq], axis: 1)
+            }
+            pred2 = modelFn(
+                imgEulerInput, imgInputIds, tPrevVec, txt, txtIds, guidanceVec, peX, peCtx,
+                txtEmbedded, guidanceEmbedded)
+            if imgCondSeq != nil { pred2 = pred2[0..., ..<img.dim(1)] }
+        } else {
+            // Final step: Heun collapses to Euler (no corrector), matching standard practice.
+            pred2 = pred1
+        }
+        // Trapezoid average of the two velocities.
+        let pred = (pred1 + pred2) * 0.5
         img = img + dt * pred
         if let postStep { img = postStep(step, tPrev, img) }
         if evalFreq <= 1 || (step + 1) % evalFreq == 0 || step == numSteps - 1 {

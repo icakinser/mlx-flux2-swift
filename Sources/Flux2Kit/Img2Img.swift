@@ -53,7 +53,7 @@ extension Flux2Pipeline {
         if strength <= 0.0 {
             try ensureVAE()
             let vae = try requireVAE()
-            let resized = try resizeExactRGB(source, width: width, height: height)
+            let resized = try resizeHighQuality(source, width: width, height: height)
             let sourceArray = try cgImageToArray(resized)
             let latents = try vae.encode(expandedDimensions(sourceArray, axis: 0)).asType(dtype)
             let decoded = try decodeMaybeTiled(latents)
@@ -81,7 +81,7 @@ extension Flux2Pipeline {
 
         // Source latents at exactly the output geometry, tokenized with the same position
         // ids the noise path would produce.
-        let resized = try resizeExactRGB(source, width: width, height: height)
+        let resized = try resizeHighQuality(source, width: width, height: height)
         let sourceArray = try cgImageToArray(resized)  // (H, W, 3) in [-1, 1]
         // Consistent with encodeImageRefs: VAE encode returns NHWC-patchified
         // latents; tokenization expects channels-first (b, 128, h/16, w/16).

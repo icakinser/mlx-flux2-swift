@@ -1,0 +1,17 @@
+[ 1234.4ms] Pipeline load
+[  218.5ms] Text encode: 64 tokens, shape [1, 64, 7680]
+           ├─ tokenize: 1.3ms
+           ├─ model:    215.8ms
+           └─ prc_txt:  1.2ms
+[    3.6ms] Noise init: 1024 latent tokens
+[    3.7ms] Position embeddings
+[  689.1ms] Step 1/4  t=1.0000→0.9581
+[  647.9ms] Step 2/4  t=0.9581→0.8840
+[  662.2ms] Step 3/4  t=0.8840→0.7175
+[  664.0ms] Step 4/4  t=0.7175→0.0000
+[ 2663.7ms] Denoise total (4 steps, 665.9ms/step avg)
+[    3.1ms] Scatter/reshape
+[  342.0ms] VAE decode
+[    2.5ms] To image
+[ 3238.7ms] TOTAL
+Saved /Users/robertkinser/Desktop/mlx-flux2-swift/dev/test/outputs/t2i_euler.png

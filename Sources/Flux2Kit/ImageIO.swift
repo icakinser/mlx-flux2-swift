@@ -20,7 +20,7 @@ public func capPixels(_ img: CGImage, _ k: Int) throws -> CGImage {
     let scale = (Double(k) / Double(w * h)).squareRoot()
     let newW = Int(Double(w) * scale)
     let newH = Int(Double(h) * scale)
-    return try resizeExactRGB(img, width: newW, height: newH)
+    return try resizeHighQuality(img, width: newW, height: newH)
 }
 
 // Rejects images that are too small or have an extreme aspect ratio.
@@ -155,14 +155,20 @@ public func savePNG(_ img: CGImage, to url: URL) throws {
 }
 
 /// Save a CGImage as PNG or JPEG (CoreGraphics only — no extra dependency). `format` is "png"/"jpg".
-public func saveImage(_ img: CGImage, to url: URL, format: String) throws {
-    let isJpg = format.lowercased() == "jpg" || format.lowercased() == "jpeg"
+/// `quality` (0.0-1.0) controls JPEG lossy compression; it is ignored for PNG.
+// 2026-07-26 EDT | PERMANENT — configurable JPEG quality; correct naming and strict format validation
+public func saveImage(_ img: CGImage, to url: URL, format: String, quality: Double = 0.92) throws {
+    let lowered = format.lowercased()
+    guard lowered == "png" || lowered == "jpg" || lowered == "jpeg" else {
+        throw Flux2Error.generationFailed("Unsupported format: \(format)")
+    }
+    let isJpg = lowered == "jpg" || lowered == "jpeg"
     let type = (isJpg ? UTType.jpeg : UTType.png).identifier as CFString
     guard let destination = CGImageDestinationCreateWithURL(url as CFURL, type, 1, nil) else {
         throw Flux2Error.generationFailed("Could not create image destination at \(url.path)")
     }
     let options: CFDictionary? =
-        isJpg ? [kCGImageDestinationLossyCompressionQuality: 0.92] as CFDictionary : nil
+        isJpg ? [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary : nil
     CGImageDestinationAddImage(destination, img, options)
     guard CGImageDestinationFinalize(destination) else {
         throw Flux2Error.generationFailed("Could not write image at \(url.path)")
@@ -172,7 +178,8 @@ public func saveImage(_ img: CGImage, to url: URL, format: String) throws {
 /// Resize a CGImage to an exact RGB size (high-quality Lanczos-equivalent). The single canonical
 /// resize used across img2img, inpaint, latent-color, and the model-free op pipeline. Returns the
 /// input unchanged when it already matches the requested size.
-func resizeExactRGB(_ img: CGImage, width: Int, height: Int) throws -> CGImage {
+// 2026-07-26 EDT | PERMANENT — Lanczos-equivalent upscale for game asset workflows
+public func resizeHighQuality(_ img: CGImage, width: Int, height: Int) throws -> CGImage {
     if img.width == width && img.height == height {
         return img
     }

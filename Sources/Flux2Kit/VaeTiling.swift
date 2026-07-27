@@ -33,7 +33,10 @@ extension Flux2Pipeline {
         reportMemory("pre-decode")
         let decoded = try decodeMaybeTiled(latent)
         eval(decoded)
-        return try arrayToCGImage(decoded[0])
+        let image = try arrayToCGImage(decoded[0])
+        // 2026-07-26 EDT | PERMANENT — symmetric staged residency: free VAE after decode
+        unloadVAE()
+        return image
     }
 
     /// Decode `x` (NHWC latent) — tiled when `vaeTileLatent` is set (and positive) and the latent
@@ -43,7 +46,8 @@ extension Flux2Pipeline {
         // Parenthesize the size test so a future single-expression refactor can't accidentally drop
         // the ndim guard from the `||` branch.
         if let tile = vaeTileLatent, tile > 0, x.ndim == 4, (x.dim(1) > tile || x.dim(2) > tile) {
-            return try decodeTiled(x, tileLatent: tile, overlap: max(2, tile / 4))
+            // 2026-07-26 EDT | PERMANENT — halved overlap; feather blending compensates, halves tile count
+            return try decodeTiled(x, tileLatent: tile, overlap: max(2, tile / 8))
         }
         return try vae.decode(x)
     }

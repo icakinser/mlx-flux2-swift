@@ -1,0 +1,93 @@
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+[0/1] Planning build
+[1/1] Compiling plugin CudaBuild
+[2/2] Compiling plugin GenerateManual
+[3/3] Compiling plugin GenerateDoccReference
+Building for debugging...
+[3/7] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (7.38s)
+Test Suite 'All tests' started at 2026-07-26 19:39:58.347.
+Test Suite 'All tests' passed at 2026-07-26 19:39:58.366.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.019) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Test cliRecolorParserWarnings() started.
+◇ Test effectsBasics() started.
+◇ Test saveImageRejectsUnsupportedFormat() started.
+◇ Test maskTokensFollowRasterOrder() started.
+◇ Test cliNumericParsersStrict() started.
+◇ Test transformerConversionThrowsOnMissingRename() started.
+◇ Test cliTupleParsers() started.
+◇ Test pixelFilterBasics() started.
+◇ Test rotateInvalidDegreesThrows() started.
+◇ Test cliSeedsListStrict() started.
+◇ Test vaeConversionThrowsOnEmpty() started.
+◇ Test resizeHighQualityDimensions() started.
+◇ Test tokenIdsMatchGolden() started.
+◇ Test resolveShardPathsFallbackGlob() started.
+◇ Test transformerConversionMapsRenameKeys() started.
+◇ Test matchColorMovesMean() started.
+◇ Test applyImageOpsFusedChain() started.
+◇ Test chatTemplateMatchesReferenceRender() started.
+◇ Test blendBroadcastsOverCfgBatch() started.
+◇ Test dilateErodeChangeArea() started.
+◇ Test vaeConversionThrowsOnMissingKey() started.
+◇ Test boxBlurFeatherProperties() started.
+◇ Test hsvRoundTrip() started.
+◇ Test resolveShardPathsMissingShard() started.
+◇ Test colorCurvesClosedForm() started.
+◇ Test transformerConversionSwapsNormOutHalves() started.
+◇ Test specialTokenIdsMatchGolden() started.
+◇ Test cgImageToArrayKnownValues() started.
+◇ Test weightsHelpMentionsDownload() started.
+◇ Test memoryLimitsRejectNonPositive() started.
+◇ Test scheduleRescaleIntoStrengthWindow() started.
+◇ Test imageRoundTripStable() started.
+◇ Test featherRampShape() started.
+◇ Test capMinPixelsRejectsBadImages() started.
+◇ Test imageOpsGeometry() started.
+◇ Test memoryLimitsAcceptPositive() started.
+◇ Test boxMaskCoverage() started.
+◇ Test quantFilterSelectsBigLinears() started.
+◇ Test resolveShardPathsWithIndex() started.
+✔ Test transformerConversionThrowsOnMissingRename() passed after 0.010 seconds.
+✔ Test vaeConversionThrowsOnEmpty() passed after 0.010 seconds.
+✔ Test cliRecolorParserWarnings() passed after 0.011 seconds.
+✔ Test cliSeedsListStrict() passed after 0.012 seconds.
+✔ Test cliNumericParsersStrict() passed after 0.012 seconds.
+✔ Test cliTupleParsers() passed after 0.012 seconds.
+✔ Test resolveShardPathsFallbackGlob() passed after 0.012 seconds.
+✔ Test saveImageRejectsUnsupportedFormat() passed after 0.012 seconds.
+✔ Test resizeHighQualityDimensions() passed after 0.012 seconds.
+✔ Test rotateInvalidDegreesThrows() passed after 0.012 seconds.
+✔ Test resolveShardPathsMissingShard() passed after 0.012 seconds.
+✔ Test weightsHelpMentionsDownload() passed after 0.013 seconds.
+✔ Test memoryLimitsRejectNonPositive() passed after 0.013 seconds.
+✔ Test vaeConversionThrowsOnMissingKey() passed after 0.013 seconds.
+✔ Test featherRampShape() passed after 0.013 seconds.
+✔ Test imageOpsGeometry() passed after 0.013 seconds.
+✔ Test capMinPixelsRejectsBadImages() passed after 0.013 seconds.
+✔ Test memoryLimitsAcceptPositive() passed after 0.013 seconds.
+✔ Test transformerConversionMapsRenameKeys() passed after 0.013 seconds.
+✔ Test quantFilterSelectsBigLinears() passed after 0.013 seconds.
+✔ Test transformerConversionSwapsNormOutHalves() passed after 0.013 seconds.
+✔ Test blendBroadcastsOverCfgBatch() passed after 0.013 seconds.
+✔ Test pixelFilterBasics() passed after 0.013 seconds.
+✔ Test maskTokensFollowRasterOrder() passed after 0.013 seconds.
+✔ Test resolveShardPathsWithIndex() passed after 0.013 seconds.
+✔ Test scheduleRescaleIntoStrengthWindow() passed after 0.027 seconds.
+✔ Test matchColorMovesMean() passed after 0.029 seconds.
+✔ Test boxBlurFeatherProperties() passed after 0.029 seconds.
+✔ Test cgImageToArrayKnownValues() passed after 0.029 seconds.
+✔ Test hsvRoundTrip() passed after 0.030 seconds.
+✔ Test boxMaskCoverage() passed after 0.030 seconds.
+✔ Test imageRoundTripStable() passed after 0.030 seconds.
+✔ Test colorCurvesClosedForm() passed after 0.030 seconds.
+✔ Test effectsBasics() passed after 0.030 seconds.
+✔ Test applyImageOpsFusedChain() passed after 0.030 seconds.
+✔ Test dilateErodeChangeArea() passed after 0.035 seconds.
+✔ Test specialTokenIdsMatchGolden() passed after 1.650 seconds.
+✔ Test tokenIdsMatchGolden() passed after 1.652 seconds.
+✔ Test chatTemplateMatchesReferenceRender() passed after 1.656 seconds.
+✔ Test run with 39 tests in 0 suites passed after 1.656 seconds.

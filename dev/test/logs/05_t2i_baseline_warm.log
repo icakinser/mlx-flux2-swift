@@ -1,0 +1,17 @@
+[ 1249.1ms] Pipeline load
+[  210.7ms] Text encode: 64 tokens, shape [1, 64, 7680]
+           ├─ tokenize: 0.9ms
+           ├─ model:    208.5ms
+           └─ prc_txt:  1.3ms
+[    3.8ms] Noise init: 1024 latent tokens
+[    3.8ms] Position embeddings
+[  673.2ms] Step 1/4  t=1.0000→0.9581
+[  647.6ms] Step 2/4  t=0.9581→0.8840
+[  653.3ms] Step 3/4  t=0.8840→0.7175
+[  648.8ms] Step 4/4  t=0.7175→0.0000
+[ 2623.3ms] Denoise total (4 steps, 655.8ms/step avg)
+[    3.6ms] Scatter/reshape
+[  332.3ms] VAE decode
+[    2.5ms] To image
+[ 3181.4ms] TOTAL
+Saved /Users/robertkinser/Desktop/mlx-flux2-swift/dev/test/outputs/t2i_baseline_warm.png

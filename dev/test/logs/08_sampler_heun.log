@@ -1,0 +1,17 @@
+[ 1324.5ms] Pipeline load
+[  208.1ms] Text encode: 64 tokens, shape [1, 64, 7680]
+           ├─ tokenize: 1.0ms
+           ├─ model:    205.7ms
+           └─ prc_txt:  1.4ms
+[    3.2ms] Noise init: 1024 latent tokens
+[    3.9ms] Position embeddings
+[ 1317.7ms] Step 1/4  t=1.0000→0.9581
+[ 1306.1ms] Step 2/4  t=0.9581→0.8840
+[ 1299.2ms] Step 3/4  t=0.8840→0.7175
+[  649.1ms] Step 4/4  t=0.7175→0.0000
+[ 4572.5ms] Denoise total (4 steps, 1143.1ms/step avg)
+[    3.2ms] Scatter/reshape
+[  331.5ms] VAE decode
+[    2.7ms] To image
+[ 5126.4ms] TOTAL
+Saved /Users/robertkinser/Desktop/mlx-flux2-swift/dev/test/outputs/t2i_heun.png

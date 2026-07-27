@@ -4,6 +4,7 @@
 // metallib), so these cover the tokenizer/template contract, not tensors.
 
 import CoreGraphics
+import Darwin
 import Foundation
 import MLX
 import MLXNN
@@ -377,6 +378,20 @@ private func onCPUThrows(_ body: () throws -> Void) throws {
     } catch { #expect(error is CLIParseError) }
 }
 
+/// M9: the `--seeds` list must reject a malformed entry rather than silently dropping it.
+/// Mirrors the CLI loop that parses each comma-separated token with `parseUInt64Arg`.
+@Test func cliSeedsListStrict() throws {
+    func parseSeeds(_ raw: String) throws -> [UInt64] {
+        try raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            .map { try parseUInt64Arg("--seeds", $0) }
+    }
+    #expect(try parseSeeds("1,2,3") == [1, 2, 3])
+    do {
+        _ = try parseSeeds("1,abc,3")
+        Issue.record("expected throw for malformed seed entry 'abc'")
+    } catch { #expect(error is CLIParseError) }
+}
+
 /// WxH / 4-tuple / outpaint parsers accept valid specs and reject malformed ones.
 @Test func cliTupleParsers() throws {
     let (w, h) = try parseWxHArg("512x768")
@@ -672,4 +687,112 @@ private func tinyFluxConfig(depth: Int, single: Int) -> Flux2Config {
     // Without an index file, the default fallback glob is used.
     let resolved = try resolveShardPaths(tmp)
     #expect(resolved.map(\.lastPathComponent) == [f1.lastPathComponent, f2.lastPathComponent])
+}
+
+// MARK: - M2: Memory limit validation
+
+@Test func memoryLimitsRejectNonPositive() throws {
+    do {
+        try applyMemoryLimits(cacheLimitMB: -1, memoryLimitMB: nil)
+        Issue.record("Expected applyMemoryLimits to throw on negative cacheLimitMB")
+    } catch {
+        #expect(error is Flux2Error)
+    }
+    do {
+        try applyMemoryLimits(cacheLimitMB: 0, memoryLimitMB: nil)
+        Issue.record("Expected applyMemoryLimits to throw on zero cacheLimitMB")
+    } catch {
+        #expect(error is Flux2Error)
+    }
+    do {
+        try applyMemoryLimits(cacheLimitMB: nil, memoryLimitMB: -5)
+        Issue.record("Expected applyMemoryLimits to throw on negative memoryLimitMB")
+    } catch {
+        #expect(error is Flux2Error)
+    }
+}
+
+@Test func memoryLimitsAcceptPositive() throws {
+    try applyMemoryLimits(cacheLimitMB: 512, memoryLimitMB: 1024)
+    try applyMemoryLimits(cacheLimitMB: nil, memoryLimitMB: nil)
+}
+
+// MARK: - M6: resizeHighQuality dimensions
+
+@Test(.enabled(if: mlxTestsEnabled)) func resizeHighQualityDimensions() throws {
+    // Build a small solid-color image and verify resize output dimensions.
+    let w = 32, h = 32
+    guard let ctx = CGContext(
+        data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+    else { throw Flux2Error.generationFailed("ctx") }
+    ctx.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+    ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+    guard let img = ctx.makeImage() else { throw Flux2Error.generationFailed("img") }
+
+    let up = try resizeHighQuality(img, width: 64, height: 128)
+    #expect(up.width == 64)
+    #expect(up.height == 128)
+
+    // Same-size is a no-op returning the identical object.
+    let same = try resizeHighQuality(img, width: w, height: h)
+    #expect(same.width == w && same.height == h)
+}
+
+// MARK: - M12: strict output format validation
+
+@Test func saveImageRejectsUnsupportedFormat() throws {
+    // Build a tiny solid image; the format guard fires before any file I/O.
+    let w = 4, h = 4
+    guard let ctx = CGContext(
+        data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+    else { throw Flux2Error.generationFailed("ctx") }
+    ctx.setFillColor(CGColor(red: 0, green: 1, blue: 0, alpha: 1))
+    ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+    guard let img = ctx.makeImage() else { throw Flux2Error.generationFailed("img") }
+
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("flux2kit-m12-\(UUID().uuidString).webp")
+    do {
+        try saveImage(img, to: url, format: "webp")
+        Issue.record("expected saveImage to throw on unsupported format")
+    } catch {
+        #expect(error is Flux2Error)
+    }
+}
+
+// MARK: - M10: unrecognized quantize mode warning
+
+/// Run `body` with `stderr` redirected to a pipe and return whatever it wrote there.
+private func captureStderr(_ body: () -> Void) -> String {
+    let pipe = Pipe()
+    // Snapshot the real stderr fd so we can restore it after redirecting fd 2 into the pipe.
+    let savedFd = dup(STDERR_FILENO)
+    dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
+    body()
+    fflush(nil)
+    dup2(savedFd, STDERR_FILENO)
+    close(savedFd)
+    try? pipe.fileHandleForWriting.close()
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    return String(data: data, encoding: .utf8) ?? ""
+}
+
+@Test func quantizeModuleWarnsOnUnrecognizedMode() throws {
+    let module = Linear(64, 64)
+    let msg = captureStderr { quantizeModule(module, mode: "fp8") }
+    #expect(msg.contains("unrecognized quantize mode 'fp8'"))
+}
+
+@Test func quantizeModuleSilentOnValidMode() throws {
+    let module = Linear(64, 64)
+    // nil mode is a no-op and must not warn.
+    let nilMsg = captureStderr { quantizeModule(module, mode: nil) }
+    #expect(nilMsg.isEmpty)
+    // A recognized mode must not emit the warning either.
+    let validMsg = captureStderr { quantizeModule(Linear(64, 64), mode: "int4") }
+    #expect(!validMsg.contains("unrecognized quantize mode"))
 }
