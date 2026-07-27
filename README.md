@@ -10,6 +10,23 @@ Derived from the [`scf4/mlx-flux2`](https://github.com/scf4/mlx-flux2) reference
 > **Module name:** the SwiftPM library target is `Flux2Kit` (you `import Flux2Kit`).
 > The repository / product is `mlx-flux2-swift`, mirroring the `mlx-swift` naming convention.
 
+## Contents
+
+- [Features](#features)
+- [Quickstart](#quickstart)
+- [Requirements](#requirements)
+- [Model weights](#model-weights)
+- [Build](#build)
+- [CLI usage](#cli-usage)
+- [Library usage](#library-usage)
+- [ComfyUI](#comfyui)
+- [Editing](#editing)
+- [Memory](#memory)
+- [Performance and quality gates](#performance-and-quality-gates)
+- [Tests](#tests)
+- [Project structure](#project-structure)
+- [Credits & licensing](#credits--licensing)
+
 ## Features
 
 - **Text-to-image** — FLUX.2 [klein] 4B on Apple Silicon via MLX.
@@ -32,10 +49,17 @@ Derived from the [`scf4/mlx-flux2`](https://github.com/scf4/mlx-flux2) reference
 - **Batch & formats** — `--num N` / `--seeds` (strict parsing), PNG or JPEG with `--quality`,
   automatic random seeding when `-s` is omitted.
 - **Weights** — optional `--download` from Hugging Face, or bring your own.
-- **Library + sample** — use `Flux2Kit` in your own package; a runnable example lives in
-  [`Examples/Flux2KitExample`](Examples/Flux2KitExample).
+- **Shared generation engine** — text-to-image, img2img, inpaint, outpaint, and every editing mode
+  run through one execution path, so sampler, guidance schedule, progress, cancellation, evaluation
+  frequency, and compile policy behave consistently everywhere.
+- **Library + samples** — use `Flux2Kit` in your own package; runnable examples live in
+  [`Examples/Flux2KitExample`](Examples/Flux2KitExample) (path-dependency CLI-style sample) and
+  [`Examples/Flux2KitSwiftUIExample`](Examples/Flux2KitSwiftUIExample) (a SwiftUI app with progress,
+  cancellation, and reference-image import).
 - **ComfyUI nodes** — Generate and Edit/Inpaint nodes (Apple Silicon macOS only) in
   [`ComfyUI/`](ComfyUI), wrapping the CLI.
+- **Tested & measured** — CPU/tokenizer unit tests, MLX math tests, a full-model strict/soft image
+  quality harness with checked-in goldens, a release benchmark, and GitHub Actions CI.
 
 ## Quickstart
 
@@ -236,6 +260,11 @@ swift run -c release flux2kit-cli --source photo.png \
   --recolor "exp=0.3,contrast=1.1,sat=1.2,hue=0.02" --output out.png
 swift run -c release flux2kit-cli --source knight.png --mask armor.png \
   --temperature 2.5 --saturation 3 --output out.png
+
+# semantic recolor — --recolor with -p AND a mask runs a mask-guided diffusion recolor that
+# respects lighting/material (pixel grade alone stays model-free)
+swift run -c release flux2kit-cli --source car.png --mask car.png \
+  -p "a deep red sports car" --recolor "sat=1.2" -s 42 --output out.png
 ```
 
 More modes and options:
@@ -358,6 +387,102 @@ once first — it stages `mlx.metallib` next to the test binary (and the CLI) au
 
 Manual CLI/feature verification artifacts (logs + sample outputs) live under
 [`dev/test/`](dev/test/) — see [`dev/test/RESULTS.md`](dev/test/RESULTS.md).
+
+## Project structure
+
+`Flux2Kit` is the library product; everything else exists to build, demonstrate, test, or ship it.
+
+```
+mlx-flux2-swift/
+├── Package.swift                 # SwiftPM manifest: Flux2Kit (library) + flux2kit-cli (executable)
+├── Package.resolved              # pinned dependency graph (mlx-swift, swift-transformers, …)
+├── LICENSE / NOTICE              # Apache-2.0 + attribution (upstream MIT retained)
+├── Sources/
+│   ├── Flux2Kit/                 # the library — public API + package-scoped internals
+│   └── Flux2KitCLI/              # thin CLI demo/harness over the public API
+├── Tests/Flux2KitTests/          # unit, MLX-math, and full-model image-quality tests + goldens
+├── Examples/                     # standalone SwiftPM consumers (depend on Flux2Kit by path)
+├── ComfyUI/                      # custom ComfyUI nodes wrapping the CLI (Apple Silicon macOS)
+├── Docs/                         # library, consumer, release, and changelog docs
+├── Scripts/                      # metallib, benchmark, golden-refresh, and consumer-smoke helpers
+├── .github/workflows/            # CI: PR build/test + release-readiness gates
+└── dev/                          # baselines, research notes, and manual test artifacts
+```
+
+### Library — `Sources/Flux2Kit/`
+
+**Pipeline & options (public surface)**
+
+| File | Responsibility |
+|------|----------------|
+| `Flux2Pipeline.swift` | Load weights, `generate` (text-to-image), lifecycle, residency, threading. |
+| `PublicOptions.swift` | `PipelineConfiguration`, `DenoiseOptions`, `ImageToImageOptions`, `InpaintOptions`, `OutpaintOptions`. |
+| `GenerationEngine.swift` | Shared denoise execution engine and `GenerationCancellation`. |
+| `Flux2Config.swift` | Model/VAE/tokenizer configs, defaults (the klein recipe), and `Flux2Error`. |
+
+**Generation modes**
+
+| File | Responsibility |
+|------|----------------|
+| `Sampling.swift` | Schedules, Euler & Heun-2 denoise, guidance, RoPE/token mapping, reference conditioning. |
+| `Img2Img.swift` | Strength-based img2img (initializes from noised source latents). |
+| `Inpaint.swift` | Mask-guided inpaint — the foundation for every editing mode. |
+| `Outpaint.swift` | Canvas extension via the inpaint machinery. |
+| `Editing.swift` | `removeObject`, `addObject`, `replaceBackground`, `editRegion`, `recolor`, `applyPixelFilter`. |
+| `MaskGen.swift` | Built-in box/ellipse masks + dilate/erode morphology. |
+
+**Model implementation (package-scoped)**
+
+| File | Responsibility |
+|------|----------------|
+| `Flux2Model.swift` | The transformer: double/single-stream blocks, attention, modulation. |
+| `Flux2VAE.swift` | VAE encoder/decoder. |
+| `Qwen3TextEncoder.swift` | Qwen3 text encoder and tokenizer. |
+| `WeightLoading.swift` | diffusers→MLX weight conversion, sharded safetensors, key alignment. |
+| `WeightDownloader.swift` | Opt-in Hugging Face snapshot download. |
+| `MemoryManagement.swift` | Quantization filter, residency policy, MLX cache/memory limits, reporting. |
+| `VaeTiling.swift` | Opt-in tiled VAE decode for large images. |
+
+**Model-free image toolkit & utilities**
+
+| File | Responsibility |
+|------|----------------|
+| `ImageOps.swift` | Composable model-free op pipeline (geometry + color + effects) with mask compositing. |
+| `ColorAdjust.swift` | Exact pixel-space color grade (exposure/contrast/gamma/hue/saturation). |
+| `Effects.swift` | Additional model-free photo effects (blur, sharpen, posterize, vignette, …). |
+| `LatentColorExperimental.swift` | Experimental latent-space color A/B path (opt-in, unreliable by design). |
+| `ImageIO.swift` | Image load/save/`resizeHighQuality` via CoreGraphics. |
+| `CLIParsing.swift` | Testable, strict CLI parse helpers (package-scoped; shared with tests). |
+| `PerformanceTracing.swift` | Instruments signposts for generation stages and denoise steps. |
+| `Flux2Kit.docc/` | DocC catalog for the public API. |
+
+### CLI — `Sources/Flux2KitCLI/`
+
+`CLIMain.swift` is a thin headless harness that maps flags 1:1 onto library calls — text-to-image,
+img2img, editing, outpaint, model-free ops, batch/seed handling, and the memory knobs. It adds no
+generation logic of its own.
+
+### Tests — `Tests/Flux2KitTests/`
+
+- `Flux2KitTests.swift` — CPU unit tests, tokenizer goldens (self-skip without a snapshot), and MLX
+  math tests (gated by `FLUX2_RUN_MLX_TESTS=1`).
+- `ImageQualityTests.swift` — full-model strict/soft pixel gates (gated by `FLUX2_RUN_IMAGE_TESTS=1`).
+- `Fixtures/` — checked-in golden PNGs + `manifest.json`.
+
+### Examples, nodes, docs, scripts, CI, dev
+
+- `Examples/` — [`Flux2KitExample`](Examples/Flux2KitExample) (model-free + t2i + img2img + edit) and
+  [`Flux2KitSwiftUIExample`](Examples/Flux2KitSwiftUIExample) (SwiftUI app).
+- `ComfyUI/` — `nodes.py` / `bridge.py` / `__init__.py` custom nodes + setup guide.
+- `Docs/` — [`Library.md`](Docs/Library.md) (stable API, threading, memory), [`ConsumerSetup.md`](Docs/ConsumerSetup.md)
+  (SwiftPM consumers + metallib staging), [`ReleaseChecklist.md`](Docs/ReleaseChecklist.md), and
+  [`ReleaseNotes-Next.md`](Docs/ReleaseNotes-Next.md).
+- `Scripts/` — `setup_metallib.sh`, `stage_metallib.sh`, `bench.sh`, `refresh_goldens.sh`,
+  `smoke_consumer.sh`.
+- `.github/workflows/` — `swift.yml` (PR build + tests + consumer smoke) and `release-readiness.yml`
+  (release gates + image-quality matrix + benchmark artifact).
+- `dev/` — [`bench/BASELINE.md`](dev/bench/BASELINE.md), [`research/REFERENCE_CACHE.md`](dev/research/REFERENCE_CACHE.md),
+  [`test/RESULTS.md`](dev/test/RESULTS.md), and the evolution plan.
 
 ## Credits & licensing
 
