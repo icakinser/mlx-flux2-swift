@@ -26,13 +26,13 @@ All 12 plan milestones were exercised. One acceptance criterion (M1 "pixel-exact
 
 ## 1. Unit Test Suite
 
-Three runs captured:
+Three historical runs were summarized; the raw logs have since been removed:
 
-| Log | Config | Result |
-|---|---|---|
-| `logs/00_unit_tests.log` | default `swift test` | 39/39 pass |
-| `logs/02_unit_tests_mlx_enabled.log` | `FLUX2_RUN_MLX_TESTS=1` + `FLUX2_REPO=<snapshot>` | 39/39 pass |
-| `logs/19_full_suite_final.log` | MLX + tokenizer enabled, after adding M10 tests | **41/41 pass** |
+| Config | Result |
+|---|---|
+| default `swift test` | 39/39 pass |
+| `FLUX2_RUN_MLX_TESTS=1` + `FLUX2_REPO=<snapshot>` | 39/39 pass |
+| MLX + tokenizer enabled, after adding M10 tests | **41/41 pass** |
 
 Enabling `FLUX2_RUN_MLX_TESTS` un-skips the GPU-array tests (color curves, blur/feather, masks, dilate/erode, weight-conversion, image round-trip). Enabling `FLUX2_REPO` un-skips the tokenizer/template golden tests. All pass.
 
@@ -46,7 +46,7 @@ New tests added this session:
 ## 2. Milestone Verification
 
 ### M1 — mx.compile for forward closures  ✅ (with caveat)
-Logs: `03_t2i_baseline.log`, `04_t2i_compile.log`, `05_t2i_baseline_warm.log`, `06_t2i_compile2.log`
+Verified with eager, warm-eager, and two compiled generation runs.
 
 Performance (512×512, 4 steps, warm):
 
@@ -62,7 +62,7 @@ Performance (512×512, 4 steps, warm):
 > **Finding — parity caveat.** The plan's acceptance criterion states compile output should be *pixel-exact* vs. eager. This is **not** the case: compile vs. eager differ in **46.2% of pixels** (mean abs diff **2.83/255** ≈ 1.1%, max 238). The eager path itself is fully deterministic (cold vs. warm baseline are byte-identical), and the compile path is deterministic with itself, so this is **not a wiring bug** — it is the inherent numerical reordering that `mx.compile`'s graph fusion introduces under bfloat16. The only optional argument passed as a nil-placeholder on the distilled path is `guidanceEmbedded` (adds 0 / skipped), so the closures are correctly specialized. Visually the outputs are equivalent; the difference is sub-2% mean and expected for compiled bfloat16 graphs. **Recommendation:** relax the acceptance criterion from "pixel-exact" to "visually equivalent / mean diff < 5/255", or gate `--compile` behind a documented "fast, approximate" label.
 
 ### M2 — Validate memory limit inputs  ✅
-Logs: `err_memlimit_neg.log`, `err_memlimit_zero.log`; unit tests `memoryLimitsRejectNonPositive` / `memoryLimitsAcceptPositive`.
+Verified by unit tests `memoryLimitsRejectNonPositive` / `memoryLimitsAcceptPositive`.
 
 | Input | Exit | Message |
 |---|---|---|
@@ -80,7 +80,7 @@ Verified by code inspection + full suite. All six lifecycle methods acquire the 
 Verified by code change (`max(2, tile/8)`) + suite. Tiling is opt-in via `--vae-tile`; feather blending compensates for the tighter overlap. (Not exercised end-to-end here because it requires a large image that exhausts memory; the change is a constant swap with existing feather logic.)
 
 ### M6 — Public upscale + `--upscale`  ✅
-Log: `09_upscale2.log`; unit test `resizeHighQualityDimensions`.
+Verified end-to-end and by unit test `resizeHighQualityDimensions`.
 
 | Check | Result |
 |---|---|
@@ -90,7 +90,7 @@ Log: `09_upscale2.log`; unit test `resizeHighQualityDimensions`.
 | `resizeHighQuality` unit dims | pass |
 
 ### M7 — Heun-2 sampler  ✅
-Logs: `07_sampler_euler.log`, `08_sampler_heun.log`.
+Verified with Euler and Heun generation runs.
 
 | Check | Result |
 |---|---|
@@ -100,27 +100,27 @@ Logs: `07_sampler_euler.log`, `08_sampler_heun.log`.
 | `--sampler rk4` | exit 2: `--sampler must be euler or heun, got: rk4` |
 
 ### M8 — Automatic random seeding  ✅
-Logs: `12_autoseed.log`, `13_autoseed_repro.log`.
+Verified with an automatic-seed run followed by explicit-seed reproduction.
 
 - Omitting `-s` prints `Using seed: 743424349523195359` in verbose mode.
 - Re-running with that printed seed produces a **pixel-identical** image ✅ (reproducible).
 - Two unseeded runs use different random bases (independent).
 
 ### M9 — Strict `--seeds` parsing  ✅
-Log: `err_seeds_bad.log`; unit test `cliSeedsListStrict`.
+Verified by unit test `cliSeedsListStrict`.
 
 - `--seeds 1,abc,3` → exit 2: `--seeds: invalid seed value 'abc'` (names the bad token) ✅
 - `--seeds 1,2,3` → 3 images (verified via unit test + parser path).
 
 ### M10 — Warn on unrecognized quantize mode  ✅
-Logs: `18_m10_quantize_warn.log`; unit tests `quantizeModuleWarnsOnUnrecognizedMode` / `quantizeModuleSilentOnValidMode`.
+Verified by unit tests `quantizeModuleWarnsOnUnrecognizedMode` / `quantizeModuleSilentOnValidMode`.
 
 - Library: `quantizeModule(_, mode: "fp8")` writes `Warning: unrecognized quantize mode 'fp8', skipping quantization` to stderr (verified via stderr capture) ✅
 - Library: `mode: nil` and `mode: "int4"` produce no warning ✅
 - CLI: `-q fp8` is rejected upfront (exit 2: `--quantize must be none, int8, or int4`) — the CLI validates before reaching the library, so the library warning is for programmatic callers. Both layers are correct.
 
 ### M11 — Configurable JPEG quality  ✅
-Logs: `10_jpg_q05.log`, `11_jpg_q092.log`.
+Verified with JPEG quality 0.5 and 0.92 generation runs.
 
 | Check | Result |
 |---|---|
@@ -130,7 +130,7 @@ Logs: `10_jpg_q05.log`, `11_jpg_q092.log`.
 | PNG output | unaffected by `--quality` |
 
 ### M12 — Vestigial naming + strict format  ✅
-Logs: `03_t2i_baseline.log` (timing label), `err_format_bad.log`; unit test `saveImageRejectsUnsupportedFormat`.
+Verified by verbose generation and unit test `saveImageRejectsUnsupportedFormat`.
 
 - Verbose output now prints `To image` (was `To PIL`); timing key is `to_image` ✅
 - `--format webp` → exit 2: `--format must be png or jpg, got: webp`
@@ -174,7 +174,6 @@ All invalid inputs produce a clear message and a non-zero exit. CLI validation e
 
 ## 5. Artifacts
 
-- `logs/` — one log per test run (unit suites, each CLI feature, each error case).
 - `outputs/` — generated PNG/JPG images for visual inspection.
 - `RESULTS.md` — this file.
 
@@ -198,4 +197,6 @@ FLUX2_RUN_MLX_TESTS=1 FLUX2_REPO="$REPO" swift test
 
 1. **M1 parity criterion** — relax "pixel-exact" to "visually equivalent (mean diff < 5/255)" or label `--compile` as a fast/approximate mode. The observed 2.83/255 mean difference is expected bfloat16 graph-fusion behavior, not a defect.
 2. **M5 tiling** — not exercised end-to-end (needs an image large enough to exhaust memory). The change is a low-risk constant swap; consider adding a dedicated large-image tiling test if memory budget allows.
-3. **Deferred (per plan):** KV-cache for reference images and CFG guidance schedule decay remain out of scope pending parity-baseline confirmation.
+3. **Reference caching:** later research concluded that transformer K/V reuse is unsafe in the current
+   timestep-modulated architecture; see `dev/research/REFERENCE_CACHE.md`. Experimental linear
+   guidance scheduling is now available through `GuidanceSchedule` and `--guidance-end`.

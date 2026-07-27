@@ -8,6 +8,13 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      run_image_tests:
+        description: "Run full-model image quality gates on a configured Apple Silicon runner"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -33,3 +40,40 @@ jobs:
       env:
         FLUX2_RUN_MLX_TESTS: "1"
       run: swift test -v
+    - name: Require golden review for weight-loader changes
+      if: github.event_name == 'pull_request'
+      run: |
+        git fetch origin "$GITHUB_BASE_REF" --depth=1
+        changed="$(git diff --name-only "origin/$GITHUB_BASE_REF"...HEAD)"
+        weight_loader_changed=false
+        golden_changed=false
+        while IFS= read -r path; do
+          case "$path" in
+            Sources/Flux2Kit/WeightLoading.swift) weight_loader_changed=true ;;
+            Tests/Flux2KitTests/Fixtures/*.png) golden_changed=true ;;
+          esac
+        done <<< "$changed"
+        if [[ "$weight_loader_changed" == true && "$golden_changed" != true ]]; then
+          echo "WeightLoading.swift changed without an intentionally reviewed image golden." >&2
+          echo "Run Scripts/refresh_goldens.sh and commit the reviewed fixture, or split a" >&2
+          echo "non-numerical loader-only change into a PR with an explicit maintainer waiver." >&2
+          exit 1
+        fi
+
+  image-quality:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_image_tests
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Verify configured model
+      run: |
+        if [[ -z "${FLUX2_REPO:-}" || ! -d "$FLUX2_REPO" ]]; then
+          echo "Configure FLUX2_REPO on the self-hosted runner." >&2
+          exit 1
+        fi
+    - name: Stage MLX metallib
+      run: Scripts/setup_metallib.sh
+    - name: Run real-model image quality gates
+      env:
+        FLUX2_RUN_IMAGE_TESTS: "1"
+      run: swift test --filter ImageQualityTests

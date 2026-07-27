@@ -1,4 +1,4 @@
-// Flux2Kit — mask-guided inpainting (editing foundation). Not parity-locked: no counterpart in
+// Flux2Kit — mask-guided inpainting (editing foundation). No direct counterpart exists in
 // the reference. Reuses the img2img re-noising, the prcImg/scatterIds token mapping, and the
 // denoise postStep hook. One mechanism underlies removal, background replacement, region editing,
 // and prompt-conditioned object addition (see Editing.swift).

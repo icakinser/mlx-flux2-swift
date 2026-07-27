@@ -1,5 +1,5 @@
 // Flux2Kit — memory system: quantization filter, residency policy, MLX cache/memory limits, and
-// per-stage reporting. Opt-in; the default keeps all models resident in bf16 (the parity path).
+// per-stage reporting. Opt-in; the deterministic default keeps all models resident in bf16.
 //
 // Inference is bandwidth-bound and the three sub-models (text encoder, transformer, VAE) run
 // sequentially, so the big levers are (1) quantization (fewer weight bytes to store AND read) and
@@ -20,7 +20,7 @@ public enum ResidencyPolicy: Sendable {
 /// and skips the `adaLN_modulation` `[SiLU, Linear]` container — that mixed-type module array breaks
 /// `MLXNN.quantize`'s tree-walk (`unexpectedStructure(key: "adaLN_modulation")`). Skipping the small
 /// modulation/norm layers and quantizing the big attention/MLP matmuls is the standard FLUX recipe.
-public func flux2QuantFilter(groupSize: Int) -> (String, Module) -> Bool {
+package func flux2QuantFilter(groupSize: Int) -> (String, Module) -> Bool {
     { path, m in
         guard let lin = m as? Linear else { return false }
         if path.contains("adaLN") { return false }
@@ -31,7 +31,7 @@ public func flux2QuantFilter(groupSize: Int) -> (String, Module) -> Bool {
 
 /// Quantize a module in place using the FLUX filter. No-op unless `mode` is "int8"/"int4".
 // 2026-07-26 EDT | PERMANENT — surface unrecognized quantize modes
-public func quantizeModule(_ module: Module, mode: String?, groupSize: Int = 64) {
+package func quantizeModule(_ module: Module, mode: String?, groupSize: Int = 64) {
     guard let mode else { return }
     guard mode == "int8" || mode == "int4" else {
         FileHandle.standardError.write(
@@ -46,7 +46,7 @@ public func quantizeModule(_ module: Module, mode: String?, groupSize: Int = 64)
 
 /// Apply MLX buffer-cache / soft memory limits, in megabytes. `nil` leaves MLX defaults.
 // 2026-07-26 EDT | PERMANENT — reject nonsensical memory limits
-public func applyMemoryLimits(cacheLimitMB: Int?, memoryLimitMB: Int?) throws {
+package func applyMemoryLimits(cacheLimitMB: Int?, memoryLimitMB: Int?) throws {
     if let c = cacheLimitMB {
         guard c > 0 else {
             throw Flux2Error.configMissing("cacheLimitMB must be positive (got \(c))")
@@ -63,7 +63,7 @@ public func applyMemoryLimits(cacheLimitMB: Int?, memoryLimitMB: Int?) throws {
 
 /// Process resident set size (bytes) — the true footprint, including mmap'd weight pages that MLX's
 /// own counters do not track. Returns 0 if the mach call fails.
-public func processResidentBytes() -> Int {
+package func processResidentBytes() -> Int {
     var info = mach_task_basic_info()
     var count = mach_msg_type_number_t(
         MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size)
@@ -78,7 +78,7 @@ public func processResidentBytes() -> Int {
 /// One-line memory report for `--mem-report`: process RSS (the real footprint) plus MLX active/peak
 /// buffer counters. MLX's counters exclude mmap'd weights, so RSS is the number that reflects the
 /// staged-residency win.
-public func memoryReportLine(_ stage: String) -> String {
+package func memoryReportLine(_ stage: String) -> String {
     func gb(_ bytes: Int) -> String { String(format: "%.2fGB", Double(bytes) / 1_073_741_824) }
     let label = stage.padding(toLength: 18, withPad: " ", startingAt: 0)
     return "[mem] \(label) rss=\(gb(processResidentBytes())) "

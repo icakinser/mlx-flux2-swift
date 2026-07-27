@@ -1,6 +1,6 @@
 // Flux2Kit — native MLX Swift port of FLUX.2 [klein], derived from scf4/mlx-flux2 (MIT).
-// 2026-07-19 EDT | PERMANENT (Flux2Kit t2i port) — numerical parity with the reference implementation is the
-// contract; do not refactor without re-running the parity harness.
+// The Python implementation is a baseline, not a feature ceiling. Generation changes are gated by
+// the strict/soft image quality harness in ImageQualityTests.
 
 import CoreGraphics
 import Foundation
@@ -37,6 +37,28 @@ private func isFloatingPoint(_ dtype: DType) -> Bool {
 ///   processes rather than shared instances.
 /// Ergonomic bundle of text-to-image parameters for `Flux2Pipeline.generate(_:inputImages:)`. Lets
 /// callers set only the fields they care about instead of threading a long positional argument list.
+public struct GenerationProgress: Sendable {
+    public let step: Int
+    public let totalSteps: Int
+    public let currentTimestep: Double
+    public let nextTimestep: Double
+    public let elapsedMilliseconds: Double
+
+    public init(
+        step: Int,
+        totalSteps: Int,
+        currentTimestep: Double,
+        nextTimestep: Double,
+        elapsedMilliseconds: Double
+    ) {
+        self.step = step
+        self.totalSteps = totalSteps
+        self.currentTimestep = currentTimestep
+        self.nextTimestep = nextTimestep
+        self.elapsedMilliseconds = elapsedMilliseconds
+    }
+}
+
 public struct GenerationOptions: Sendable {
     public var prompt: String
     public var width: Int
@@ -48,6 +70,8 @@ public struct GenerationOptions: Sendable {
     public var verbose: Bool
     public var evalFreq: Int
     public var sampler: Sampler
+    public var guidanceSchedule: GuidanceSchedule
+    public var progress: (@Sendable (GenerationProgress) -> Void)?
 
     public init(
         prompt: String,
@@ -59,7 +83,9 @@ public struct GenerationOptions: Sendable {
         guidanceDistilled: Bool? = nil,
         verbose: Bool = false,
         evalFreq: Int = 1,
-        sampler: Sampler = .euler
+        sampler: Sampler = .euler,
+        guidanceSchedule: GuidanceSchedule = .constant,
+        progress: (@Sendable (GenerationProgress) -> Void)? = nil
     ) {
         self.prompt = prompt
         self.width = width
@@ -71,6 +97,8 @@ public struct GenerationOptions: Sendable {
         self.verbose = verbose
         self.evalFreq = evalFreq
         self.sampler = sampler
+        self.guidanceSchedule = guidanceSchedule
+        self.progress = progress
     }
 }
 
@@ -94,9 +122,9 @@ public final class Flux2Pipeline {
     // `.unloadAfterUse` and lazily reloaded. Access through `requireTransformer()` / `requireVAE()` /
     // `requireTextEncoder()`, which throw a descriptive error instead of trapping when a stage has
     // not been loaded yet (previously these were implicitly-unwrapped and would crash the process).
-    public private(set) var model: Flux2Transformer?
-    public private(set) var vae: AutoEncoder?
-    public private(set) var textEncoder: Qwen3Embedder?
+    package private(set) var model: Flux2Transformer?
+    package private(set) var vae: AutoEncoder?
+    package private(set) var textEncoder: Qwen3Embedder?
 
     public var residency: ResidencyPolicy
     public let memReport: Bool
@@ -341,7 +369,7 @@ public final class Flux2Pipeline {
     }
 
     /// Per-stage memory line when `--mem-report` is on.
-    public func reportMemory(_ stage: String) {
+    package func reportMemory(_ stage: String) {
         if memReport { print(memoryReportLine(stage)) }
     }
 
@@ -369,7 +397,7 @@ public final class Flux2Pipeline {
     }
 
     // Encode a prompt into its final context tensor, handling CFG empty-context caching.
-    public func encodePrompt(
+    package func encodePrompt(
         _ prompt: String, guidanceDistilled: Bool, verbose: Bool = false
     ) throws -> (MLXArray, MLXArray, [String: Double]?) {
         var allTimings: [String: Double] = [:]
@@ -421,7 +449,9 @@ public final class Flux2Pipeline {
             guidanceDistilled: options.guidanceDistilled,
             verbose: options.verbose,
             evalFreq: options.evalFreq,
-            sampler: options.sampler)
+            sampler: options.sampler,
+            guidanceSchedule: options.guidanceSchedule,
+            progress: options.progress)
     }
 
     public func generate(
@@ -435,7 +465,9 @@ public final class Flux2Pipeline {
         guidanceDistilled: Bool? = nil,
         verbose: Bool = false,
         evalFreq: Int = 1,
-        sampler: Sampler = .euler
+        sampler: Sampler = .euler,
+        guidanceSchedule: GuidanceSchedule = .constant,
+        progress: (@Sendable (GenerationProgress) -> Void)? = nil
     ) throws -> CGImage {
         generationLock.lock()
         defer { generationLock.unlock() }
@@ -528,12 +560,22 @@ public final class Flux2Pipeline {
             print(String(format: "[%7.1fms] Position embeddings", (timings["pe_embed"] ?? 0) * 1000))
         }
 
+        let observesSteps = verbose || progress != nil
         let stepTimes = Flux2StepTimes()
 
         let logStep: (Int, Double, Double, MLXArray, MLXArray) -> Void = { step, tCurr, tPrev, _, _ in
             let stepTime = stepTimes.values.last ?? 0
-            print(String(format: "[%7.1fms] Step %d/%d  t=%.4f→%.4f",
-                         stepTime * 1000, step + 1, numSteps, tCurr, tPrev))
+            if verbose {
+                print(String(format: "[%7.1fms] Step %d/%d  t=%.4f→%.4f",
+                             stepTime * 1000, step + 1, numSteps, tCurr, tPrev))
+            }
+            progress?(
+                GenerationProgress(
+                    step: step,
+                    totalSteps: numSteps,
+                    currentTimestep: tCurr,
+                    nextTimestep: tPrev,
+                    elapsedMilliseconds: stepTime * 1000))
         }
 
         // 2026-07-26 EDT | PERMANENT — enables mx.compile fast path for forward closures
@@ -572,11 +614,12 @@ public final class Flux2Pipeline {
                     guidance: guidance,
                     imgCondSeq: imgCondSeq,
                     imgCondSeqIds: imgCondSeqIds,
-                    logFn: verbose ? logStep : nil,
+                    logFn: observesSteps ? logStep : nil,
                     peX: peX,
                     peCtx: peCtx,
                     modelFn: modelFn,
-                    stepTimes: verbose ? stepTimes : nil,
+                    stepTimes: observesSteps ? stepTimes : nil,
+                    guidanceSchedule: guidanceSchedule,
                     evalFreq: evalFreq)
             } else {
                 x = denoise(
@@ -585,11 +628,12 @@ public final class Flux2Pipeline {
                     guidance: guidance,
                     imgCondSeq: imgCondSeq,
                     imgCondSeqIds: imgCondSeqIds,
-                    logFn: verbose ? logStep : nil,
+                    logFn: observesSteps ? logStep : nil,
                     peX: peX,
                     peCtx: peCtx,
                     modelFn: modelFn,
-                    stepTimes: verbose ? stepTimes : nil,
+                    stepTimes: observesSteps ? stepTimes : nil,
+                    guidanceSchedule: guidanceSchedule,
                     evalFreq: evalFreq)
             }
         } else {
@@ -599,12 +643,13 @@ public final class Flux2Pipeline {
                 guidance: guidance,
                 imgCondSeq: imgCondSeq,
                 imgCondSeqIds: imgCondSeqIds,
-                logFn: verbose ? logStep : nil,
+                logFn: observesSteps ? logStep : nil,
                 peX: peX,
                 peCtx: peCtx,
                 modelFn: modelFn,
                 modelFnCfg: modelFnCfg,
-                stepTimes: verbose ? stepTimes : nil,
+                stepTimes: observesSteps ? stepTimes : nil,
+                guidanceSchedule: guidanceSchedule,
                 evalFreq: evalFreq)
         }
         timings["denoise"] = ProcessInfo.processInfo.systemUptime - t0

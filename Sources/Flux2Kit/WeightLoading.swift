@@ -1,5 +1,5 @@
 // Flux2Kit — native MLX Swift port of FLUX.2 [klein], derived from scf4/mlx-flux2 (MIT). Weight conversion + loading.
-// 2026-07-19 EDT | PERMANENT (Flux2Kit t2i port) — numerical parity with the reference implementation is the contract; do not refactor without re-running the parity harness.
+// Weight conversion is guarded by focused conversion tests plus the full-model image quality suite.
 
 import Foundation
 import MLX
@@ -21,7 +21,7 @@ private func requireKeys(_ weights: [String: MLXArray], _ keys: [String], _ cont
 /// Converts diffusers-format FLUX.2 transformer weights to this implementation's key layout.
 /// Output keys exactly match the native `flux-2-klein-4b.safetensors` checkpoint naming and are
 /// the module-parameter-tree contract (verified 2026-07-19 against the on-disk checkpoint header).
-public func convertFlux2DiffusersWeights(_ weights: [String: MLXArray], _ cfg: Flux2Config) throws -> [String: MLXArray] {
+package func convertFlux2DiffusersWeights(_ weights: [String: MLXArray], _ cfg: Flux2Config) throws -> [String: MLXArray] {
     var out: [String: MLXArray] = [:]
 
     func take(_ key: String) throws -> MLXArray {
@@ -133,7 +133,7 @@ public func convertFlux2DiffusersWeights(_ weights: [String: MLXArray], _ cfg: F
 /// checkpoint fails fast at conversion (naming the missing key) rather than loading partial weights.
 /// Structurally-optional tensors (e.g. `conv_shortcut`, which exists only when a resnet block
 /// changes channel count) remain optional and are copied when present.
-public func convertVaeDiffusersWeights(_ weights: [String: MLXArray], _ cfg: VAEConfig? = nil) throws -> [String: MLXArray] {
+package func convertVaeDiffusersWeights(_ weights: [String: MLXArray], _ cfg: VAEConfig? = nil) throws -> [String: MLXArray] {
     // Use config if provided, otherwise fall back to typical FLUX VAE structure
     let numBlocks: Int
     let numResnetsDown: Int
@@ -312,7 +312,7 @@ public func convertVaeDiffusersWeights(_ weights: [String: MLXArray], _ cfg: VAE
 
 /// The HF-cache branch is an explicit local-files-only
 /// reimplementation of huggingface_hub.snapshot_download (never touches the network).
-public func resolveRepoPath(_ repoId: String, _ localPath: URL? = nil, revision: String? = nil) throws -> URL {
+package func resolveRepoPath(_ repoId: String, _ localPath: URL? = nil, revision: String? = nil) throws -> URL {
     let fm = FileManager.default
     if let localPath {
         if !fm.fileExists(atPath: localPath.path) {
@@ -365,7 +365,7 @@ private func resolveHuggingFaceSnapshot(repoId: String, revision: String?) throw
 // MARK: - Safetensors loading
 
 /// Loads safetensors, merging files and raising on duplicate keys.
-public func loadSafetensors(_ paths: [URL]) throws -> [String: MLXArray] {
+package func loadSafetensors(_ paths: [URL]) throws -> [String: MLXArray] {
     var weights: [String: MLXArray] = [:]
     for path in paths {
         let w = try MLX.loadArrays(url: path)
@@ -380,7 +380,7 @@ public func loadSafetensors(_ paths: [URL]) throws -> [String: MLXArray] {
 }
 
 /// Sorted non-recursive glob of *.safetensors; empty on missing dir.
-public func listSafetensors(_ dirPath: URL) -> [URL] {
+package func listSafetensors(_ dirPath: URL) -> [URL] {
     let fm = FileManager.default
     guard let contents = try? fm.contentsOfDirectory(at: dirPath, includingPropertiesForKeys: nil) else {
         return []
@@ -395,7 +395,7 @@ public func listSafetensors(_ dirPath: URL) -> [URL] {
 /// Resolves the safetensors shard files in a diffusers model directory.
 /// Prefers the supplied index json (parses weight_map, dedupes + sorts shard names, verifies
 /// each exists); falls back to the glob order (*.safetensors, then model-*.safetensors).
-public func resolveShardPaths(
+package func resolveShardPaths(
     _ directory: URL,
     indexFileName: String = "model.safetensors.index.json"
 ) throws -> [URL] {
@@ -446,7 +446,7 @@ public func resolveShardPaths(
 
 /// Loads and merges all shards in a directory (e.g. text_encoder/ with model-00001-of-00002 + index json).
 /// Merge loop with duplicate-key checking.
-public func loadShardedSafetensors(_ directory: URL) throws -> [String: MLXArray] {
+package func loadShardedSafetensors(_ directory: URL) throws -> [String: MLXArray] {
     try loadSafetensors(resolveShardPaths(directory))
 }
 
@@ -455,7 +455,7 @@ public func loadShardedSafetensors(_ directory: URL) throws -> [String: MLXArray
 /// Applies a flat key-path dictionary to a module's parameter tree.
 /// strict=true enforces: missing model keys, unused dict keys,
 /// and shape mismatches all throw. strict=false applies without verification.
-public func applyWeights(_ module: Module, _ weights: [String: MLXArray], strict: Bool = true) throws {
+package func applyWeights(_ module: Module, _ weights: [String: MLXArray], strict: Bool = true) throws {
     let verify: Module.VerifyUpdate = strict ? .all : .none
     try module.update(parameters: ModuleParameters.unflattened(weights), verify: verify)
 }
@@ -472,7 +472,7 @@ private func saturatingCast(_ w: MLXArray, to dtype: DType) -> MLXArray {
 }
 
 /// Aligns weight shapes/dtypes to the module's parameters, transposing conv weights as needed, then loads them.
-public func alignAndLoad(_ module: Module, _ weights: [String: MLXArray], strict: Bool = true) throws {
+package func alignAndLoad(_ module: Module, _ weights: [String: MLXArray], strict: Bool = true) throws {
     let params = module.parameters().flattened()
     var out: [String: MLXArray] = [:]
     for (name, target) in params {
@@ -496,7 +496,7 @@ public func alignAndLoad(_ module: Module, _ weights: [String: MLXArray], strict
 }
 
 /// Aligns torch-layout weights (2D linear, OIHW conv) to the module's parameters, then loads them.
-public func alignAndLoadFromTorch(_ module: Module, _ weights: [String: MLXArray], strict: Bool = true) throws {
+package func alignAndLoadFromTorch(_ module: Module, _ weights: [String: MLXArray], strict: Bool = true) throws {
     let params = module.parameters().flattened()
     var out: [String: MLXArray] = [:]
     for (name, target) in params {
@@ -533,7 +533,7 @@ public func alignAndLoadFromTorch(_ module: Module, _ weights: [String: MLXArray
 
 /// Fuse separate Q/K/V projection weights into single QKV weight.
 /// model.layers.N.self_attn.{q,k,v}_proj.weight -> model.layers.N.self_attn.qkv_proj.weight
-public func fuseQkvWeights(_ weights: [String: MLXArray]) -> [String: MLXArray] {
+package func fuseQkvWeights(_ weights: [String: MLXArray]) -> [String: MLXArray] {
     // Matches "model.layers.(\d+).self_attn.q_proj.weight", anchored at
     // the start only, via a manual prefix/digit parse
     var layerIndices: Set<Int> = []

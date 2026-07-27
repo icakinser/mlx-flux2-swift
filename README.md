@@ -19,7 +19,8 @@ Derived from the [`scf4/mlx-flux2`](https://github.com/scf4/mlx-flux2) reference
   external mask file is required.
 - **Outpainting** — `--outpaint` extends the canvas and fills the new border in context.
 - **Samplers** — Euler (default) and Heun-2 (`--sampler heun`) for smoother low-step output.
-- **Compile fast path** — `--compile` wraps forward closures with `mx.compile` for faster warm runs.
+- **Compile path** — `--compile` wraps forward closures with `mx.compile`; it remains opt-in because
+  the measured release benefit depends on MLX version and workload.
 - **Upscale post-process** — `--upscale N` (1–8) via high-quality resize after generation or ops.
 - **Model-free image toolkit** — geometry (resize/scale/crop/rotate/flip/fit-16/pixelate) and
   color/effects (brightness, temperature, saturation, grayscale, sepia, invert, sharpen, blur,
@@ -137,6 +138,7 @@ Flags:
 | `-w, --width` / `-H, --height` | output size (`-h` is help) | config default |
 | `-t, --steps` | sampling steps | config default |
 | `--guidance` | guidance scale (use `1.0` for klein distilled) | config default |
+| `--guidance-end` | experimental linear guidance target | constant |
 | `-s, --seed` | RNG seed; omitted → random seed (printed with `-v`) | random |
 | `--sampler` | `euler` \| `heun` | `euler` |
 | `--compile` | enable `mx.compile` on forward closures | off |
@@ -178,6 +180,10 @@ cd Examples/Flux2KitExample
 swift run Flux2KitExample process /path/to/any.png          # instant, no weights
 FLUX2_REPO=/path/to/Models/FLUX-2 swift run Flux2KitExample # text-to-image
 ```
+
+See [`Docs/Library.md`](Docs/Library.md) for the stable API, progress callback, threading, and memory
+contract. External SwiftPM apps should also follow
+[`Docs/ConsumerSetup.md`](Docs/ConsumerSetup.md) to stage the MLX metallib beside their executable.
 
 ## ComfyUI
 
@@ -256,6 +262,7 @@ flux2kit-cli -p "a red bicycle" --format jpg --quality 0.5 --output out.jpg
 flux2kit-cli -p "a red bicycle" --upscale 2 --output out.png         # 2× post-process resize
 flux2kit-cli -p "a red bicycle" --sampler heun -t 4 --output out.png # smoother low-step
 flux2kit-cli -p "a red bicycle" --compile -v --output out.png        # mx.compile fast path
+flux2kit-cli -p "a red bicycle" --guidance 4 --guidance-end 1 --output out.png
 ```
 
 Editing options: `--strength F` (how freely the region regenerates), `--invert-mask`,
@@ -305,6 +312,23 @@ text encoder, transformer, **and VAE** are freed after their stages. (Quantizati
 `adaLN` modulation layers — the standard FLUX recipe — and the transformer/text-encoder big matmuls
 carry the savings.)
 
+## Performance and quality gates
+
+Benchmark release builds rather than debug builds:
+
+```sh
+FLUX2_REPO=/path/to/Models/FLUX-2 Scripts/bench.sh
+```
+
+The checked-in result is [`dev/bench/BASELINE.md`](dev/bench/BASELINE.md). On that measured host,
+`--compile` passed the soft image-quality gate but did not beat warm eager denoising, so it remains
+opt-in. `.keepResident` is recommended for repeated app generation; `.unloadAfterUse` minimizes
+between-call memory.
+
+Euler is the deterministic default and golden path. Heun performs a corrector pass on every
+non-final step and is useful when smoother low-step output is worth roughly 1.5–2× denoise time.
+`--guidance-end` is experimental; it linearly interpolates from `--guidance` to the requested value.
+
 ## Tests
 
 ```sh
@@ -313,6 +337,10 @@ FLUX2_REPO=/path/to/Models/FLUX-2 swift test
 
 # also run the editing/latent/color unit tests (need the MLX metallib — see note)
 FLUX2_RUN_MLX_TESTS=1 FLUX2_REPO=/path/to/Models/FLUX-2 swift test
+
+# full-model strict/soft image quality gates
+FLUX2_RUN_IMAGE_TESTS=1 FLUX2_REPO=/path/to/Models/FLUX-2 \
+  swift test --filter ImageQualityTests
 ```
 
 A bare `swift test` passes with GPU/tokenizer tests skipped. Tokenizer goldens self-skip unless

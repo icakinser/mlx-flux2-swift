@@ -84,6 +84,31 @@ private func onCPUThrows(_ body: () throws -> Void) throws {
     }
 }
 
+@Test(.enabled(if: mlxTestsEnabled)) func batchedPositionBuildersMatchScalarPaths() {
+    onCPU {
+        let image = MLXArray((0 ..< 48).map { Float($0) }, [2, 3, 2, 4])
+        let times = MLXArray([Int32(10), 20])
+        let (batchedImage, batchedImageIds) = batchedPrcImg(image, times)
+        let (image0, ids0) = prcImg(image[0], times[0])
+        let (image1, ids1) = prcImg(image[1], times[1])
+
+        let text = MLXArray((0 ..< 30).map { Float($0) }, [2, 5, 3])
+        let (batchedText, batchedTextIds) = batchedPrcTxt(text, times)
+        let (_, textIds0) = prcTxt(text[0], times[0])
+        let (_, textIds1) = prcTxt(text[1], times[1])
+
+        MLX.eval(batchedImage, batchedImageIds, batchedText, batchedTextIds)
+        #expect(batchedImage.shape == [2, 8, 3])
+        #expect(batchedImage[0].asArray(Float.self) == image0.asArray(Float.self))
+        #expect(batchedImage[1].asArray(Float.self) == image1.asArray(Float.self))
+        #expect(batchedImageIds[0].asArray(Int32.self) == ids0.asArray(Int32.self))
+        #expect(batchedImageIds[1].asArray(Int32.self) == ids1.asArray(Int32.self))
+        #expect(batchedText.asArray(Float.self) == text.asArray(Float.self))
+        #expect(batchedTextIds[0].asArray(Int32.self) == textIds0.asArray(Int32.self))
+        #expect(batchedTextIds[1].asArray(Int32.self) == textIds1.asArray(Int32.self))
+    }
+}
+
 /// The inpaint blend is `img * editMask + keep * (1 - editMask)` with editMask `(1,N,1)`, img the
 /// CFG-doubled `(2,N,C)` batch, and keep `(1,N,C)`. Verify the broadcast keeps the edit region equal
 /// to `img` and forces the keep region to `keep` identically across both CFG halves.
@@ -126,6 +151,14 @@ private func onCPUThrows(_ body: () throws -> Void) throws {
         #expect(firstRescaled < firstFull)
         for i in 1 ..< rescaled.count { #expect(rescaled[i] <= rescaled[i - 1]) }
     }
+}
+
+@Test func guidanceSchedulesPreserveDefaultAndInterpolate() {
+    #expect(GuidanceSchedule.constant.value(step: 2, totalSteps: 4, start: 3.5) == 3.5)
+    let linear = GuidanceSchedule.linear(end: 1.0)
+    #expect(linear.value(step: 0, totalSteps: 4, start: 4.0) == 4.0)
+    #expect(linear.value(step: 3, totalSteps: 4, start: 4.0) == 1.0)
+    #expect(abs(linear.value(step: 1, totalSteps: 4, start: 4.0) - 3.0) < 1e-12)
 }
 
 /// RGB → HSV → RGB is an identity (within float tolerance), including gray/black/white edge cases.
@@ -781,18 +814,22 @@ private func captureStderr(_ body: () -> Void) -> String {
     return String(data: data, encoding: .utf8) ?? ""
 }
 
-@Test func quantizeModuleWarnsOnUnrecognizedMode() throws {
-    let module = Linear(64, 64)
-    let msg = captureStderr { quantizeModule(module, mode: "fp8") }
-    #expect(msg.contains("unrecognized quantize mode 'fp8'"))
-}
+// File-descriptor redirection is process-global, so these tests cannot overlap.
+@Suite(.serialized)
+struct QuantizeWarningTests {
+    @Test func quantizeModuleWarnsOnUnrecognizedMode() throws {
+        let module = Linear(64, 64)
+        let msg = captureStderr { quantizeModule(module, mode: "fp8") }
+        #expect(msg.contains("unrecognized quantize mode 'fp8'"))
+    }
 
-@Test func quantizeModuleSilentOnValidMode() throws {
-    let module = Linear(64, 64)
-    // nil mode is a no-op and must not warn.
-    let nilMsg = captureStderr { quantizeModule(module, mode: nil) }
-    #expect(nilMsg.isEmpty)
-    // A recognized mode must not emit the warning either.
-    let validMsg = captureStderr { quantizeModule(Linear(64, 64), mode: "int4") }
-    #expect(!validMsg.contains("unrecognized quantize mode"))
+    @Test func quantizeModuleSilentOnValidMode() throws {
+        let module = Linear(64, 64)
+        // nil mode is a no-op and must not warn.
+        let nilMsg = captureStderr { quantizeModule(module, mode: nil) }
+        #expect(nilMsg.isEmpty)
+        // A recognized mode must not emit the warning either.
+        let validMsg = captureStderr { quantizeModule(Linear(64, 64), mode: "int4") }
+        #expect(!validMsg.contains("unrecognized quantize mode"))
+    }
 }

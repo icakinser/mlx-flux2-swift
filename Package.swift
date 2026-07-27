@@ -23,8 +23,8 @@ let package = Package(
         ),
     ],
     dependencies: [
-        // Pinned to the exact upstream revisions this port was validated against
-        // (seed-42 parity vs the mlx-flux2 Python reference). Bump as needed.
+        // Pinned to revisions validated by the unit suite, image quality gates, and release
+        // benchmark. Upgrade intentionally; the Python project is a baseline, not a version lock.
         .package(
             url: "https://github.com/ml-explore/mlx-swift.git",
             revision: "de3342cefe687116afbdd4a422d5bc8a19d21506"

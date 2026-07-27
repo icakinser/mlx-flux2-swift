@@ -2,8 +2,8 @@
 // 2026-07-20 EDT | PERMANENT (img2img strength) — kontext-from-noise regenerates text/fine
 // structure imperfectly; initializing from noised source latents (diffusers-style strength)
 // preserves glyphs and applies instructions more faithfully (A/B evidence vs the Draw Things
-// engine, which honors strength the same way). This file is NOT parity-locked: it has no
-// counterpart in the reference. It reuses only public parity-locked building blocks.
+// engine, which honors strength the same way). This path has no direct Python counterpart and is
+// governed by Flux2Kit's quality gates.
 
 import CoreGraphics
 import Foundation

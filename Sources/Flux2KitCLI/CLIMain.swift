@@ -36,6 +36,7 @@ struct Flux2KitCLI {
         var heightSet = false
         var steps = defaultSteps
         var guidance = Double(defaultGuidance)
+        var guidanceEnd: Double?
         var seed: UInt64?
         var output = defaultOutput
         // Path to the FLUX.2 diffusers snapshot. Override with --repo or the
@@ -117,6 +118,7 @@ struct Flux2KitCLI {
             case "-H", "--height": height = intArg(); heightSet = true
             case "-t", "--steps": steps = intArg()
             case "--guidance": guidance = doubleArg()
+            case "--guidance-end": guidanceEnd = doubleArg()
             case "-s", "--seed": seed = uintArg()
             case "--output": output = next(arg) ?? output
             case "--repo": repo = next(arg) ?? repo
@@ -216,7 +218,8 @@ struct Flux2KitCLI {
                 print("""
                 usage:
                   text-to-image:
-                    flux2kit-cli -p PROMPT [-w W] [-H H] [-t STEPS] [--guidance G] [-s SEED]
+                    flux2kit-cli -p PROMPT [-w W] [-H H] [-t STEPS] [--guidance G]
+                                 [--guidance-end G] [-s SEED]
                                  [--output OUT.png] [--repo PATH] [--input REF.png ...]
                                  [-q none|int8|int4] [--dtype bfloat16]
                                  [--vae-fp16] [--safe-attn] [--compile] [-v] [--eval-freq N]
@@ -254,6 +257,7 @@ struct Flux2KitCLI {
                     --upscale N        upscale output by integer factor N (1-8, default 1)
                     --sampler S        denoising integrator: euler (default) or heun (2x passes,
                                        smoother low-step output)
+                    --guidance-end F   linearly decay/ramp guidance to F (experimental)
                     --quality F        JPEG quality 0.0-1.0 (default 0.92; ignored for PNG)
 
                   editing options: --strength F  --invert-mask  --mask-feather N  [-s SEED]
@@ -521,7 +525,8 @@ struct Flux2KitCLI {
                 return try pipeline.generate(
                     prompt: p, width: width, height: height, numSteps: steps, guidance: guidance,
                     seed: curSeed, inputImages: refImages, verbose: verbose, evalFreq: evalFreq,
-                    sampler: sampler)
+                    sampler: sampler,
+                    guidanceSchedule: guidanceEnd.map { .linear(end: $0) } ?? .constant)
             }
 
             // experimental-latent is deterministic → a single output.

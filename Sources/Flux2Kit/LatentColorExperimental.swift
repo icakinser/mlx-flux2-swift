@@ -13,7 +13,7 @@ import MLX
 /// Naive elementwise "curve" on VAE latents. Layout-agnostic (works on NHWC or NCHW).
 /// - exposure: scale by 2^exposure. - contrast: expand around the global mean.
 /// - gamma: sign-preserving magnitude gamma. All are meaningless as *color* operations; see header.
-public func applyLatentCurve(
+package func applyLatentCurve(
     _ latents: MLXArray, exposure: Float = 0, contrast: Float = 1, gamma: Float = 1
 ) -> MLXArray {
     var x = latents

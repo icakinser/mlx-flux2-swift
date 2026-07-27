@@ -1,5 +1,5 @@
 // Flux2Kit — native MLX Swift port of FLUX.2 [klein], derived from scf4/mlx-flux2 (MIT).
-// 2026-07-19 EDT | PERMANENT (Flux2Kit t2i port) — numerical parity with the reference implementation is the contract; do not refactor without re-running the parity harness.
+// VAE changes are guarded by focused conversion/I/O tests and full-model image quality gates.
 
 import Foundation
 import MLX

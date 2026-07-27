@@ -59,7 +59,7 @@ public enum ImageOp {
 /// op. To preserve the previous path's clamp semantics, the fused value is clipped to `[0,1]` between
 /// ops (matching the old `arrayToCGImage` clip); the only intentional difference is that lossy uint8
 /// re-quantization no longer happens between fused ops (a precision improvement, not a change in
-/// intent — these ops are model-free creative effects, not parity-locked).
+/// intent — these ops are model-free creative effects with their own unit-tested contracts).
 public func applyImageOps(_ source: CGImage, _ ops: [ImageOp]) throws -> CGImage {
     var img = source
     var pending: MLXArray? = nil  // rgb01 in [0,1], shape (H, W, 3), when a fused run is in flight
