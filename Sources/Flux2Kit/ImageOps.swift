@@ -60,7 +60,18 @@ public enum ImageOp {
 /// ops (matching the old `arrayToCGImage` clip); the only intentional difference is that lossy uint8
 /// re-quantization no longer happens between fused ops (a precision improvement, not a change in
 /// intent — these ops are model-free creative effects with their own unit-tested contracts).
-public func applyImageOps(_ source: CGImage, _ ops: [ImageOp]) throws -> CGImage {
+///
+/// When `mask` is provided, ops run on the full frame and the result is composited back over the
+/// source inside the (optionally feathered / inverted) mask — same convention as
+/// ``Flux2Pipeline/recolor`` / ``Flux2Pipeline/applyPixelFilter`` (white = apply). The final size
+/// must match `source` (geometry ops that change dimensions are rejected when a mask is set).
+public func applyImageOps(
+    _ source: CGImage,
+    _ ops: [ImageOp],
+    mask: CGImage? = nil,
+    invertMask: Bool = false,
+    maskFeather: Int = 2
+) throws -> CGImage {
     var img = source
     var pending: MLXArray? = nil  // rgb01 in [0,1], shape (H, W, 3), when a fused run is in flight
 
@@ -129,7 +140,20 @@ public func applyImageOps(_ source: CGImage, _ ops: [ImageOp]) throws -> CGImage
         }
     }
     try flush()
-    return img
+
+    guard let mask else { return img }
+    guard img.width == source.width, img.height == source.height else {
+        throw Flux2Error.generationFailed(
+            "masked image ops require size-preserving ops (source \(source.width)x\(source.height), "
+                + "result \(img.width)x\(img.height))")
+    }
+    let base = (try cgImageToArray(source) + 1) / 2
+    let adjusted = (try cgImageToArray(img) + 1) / 2
+    var m = try maskGridFromCGImage(mask, width: source.width, height: source.height)
+    if maskFeather > 0 { m = boxBlur(m, passes: maskFeather) }
+    if invertMask { m = 1 - m }
+    let composited = compositeMasked(base: base, adjusted: adjusted, mask: m)
+    return try arrayToCGImage(composited * 2 - 1)
 }
 
 // MARK: - Geometric (CoreGraphics)

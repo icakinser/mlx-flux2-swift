@@ -10,7 +10,8 @@ public API an application uses.
 - `GenerationCancellation`
 - `Sampler`, `GuidanceSchedule`, `ResidencyPolicy`
 - Text-to-image, img2img, inpaint, outpaint, and editing methods on `Flux2Pipeline`
-- `ImageOp`, `FlipMode`, `applyImageOps`
+- `ImageOp`, `FlipMode`, `applyImageOps` (optional `mask` / `invertMask` / `maskFeather`)
+- `Flux2Pipeline.recolor` and `applyPixelFilter` (pixel path; mask-scoped)
 - Image loading, saving, and `resizeHighQuality`
 - `Flux2Error`
 - Model download helpers

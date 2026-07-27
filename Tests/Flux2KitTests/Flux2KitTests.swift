@@ -388,6 +388,40 @@ private func onCPUThrows(_ body: () throws -> Void) throws {
     }
 }
 
+/// Masked model-free ops composite only inside the white region; black stays at the source.
+@Test(.enabled(if: mlxTestsEnabled)) func applyImageOpsMaskedComposite() throws {
+    let w = 8, h = 4
+    // Full white source — invert turns white→black in [0,1].
+    let rgba = [UInt8](repeating: 255, count: h * w * 4)
+    let provider = CGDataProvider(data: Data(rgba) as CFData)!
+    let img = CGImage(
+        width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+    // Left half white (edit), right half black (keep).
+    let mask = try makeBoxMask(width: w, height: h, x: 0, y: 0, boxWidth: w / 2, boxHeight: h)
+    try onCPUThrows {
+        let out = try applyImageOps(
+            img, [.invert], mask: mask, invertMask: false, maskFeather: 0)
+        let a = try cgImageToArray(img)
+        let b = try cgImageToArray(out)
+        MLX.eval(a, b)
+        let av = a.asArray(Float.self), bv = b.asArray(Float.self)
+        // Layout (H,W,3): index = (y * w + x) * 3
+        let leftIdx = 0  // (0,0)
+        let rightIdx = (w - 1) * 3  // (0, w-1)
+        // Left inverted: white (+1) → black (-1). Right unchanged (+1).
+        #expect(bv[leftIdx] < -0.9)
+        #expect(abs(bv[rightIdx] - av[rightIdx]) < 2.0 / 255.0 + 1e-3)
+
+        // Size-changing ops + mask must fail.
+        #expect(throws: Flux2Error.self) {
+            _ = try applyImageOps(img, [.resize(4, 4)], mask: mask)
+        }
+    }
+}
+
 /// Effect filters: posterize/threshold quantize, brightness offsets, auto-contrast stretches.
 @Test(.enabled(if: mlxTestsEnabled)) func effectsBasics() {
     onCPU {

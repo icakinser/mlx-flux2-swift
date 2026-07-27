@@ -121,50 +121,57 @@ extension Flux2Pipeline {
                 progress: progress, cancellation: cancellation)
         }
 
-        // Exact pixel-space grade at native resolution.
-        let srcArray = try cgImageToArray(source)  // (H,W,3) in [-1,1]
-        let rgb01 = (srcArray + 1) / 2
-        var adjusted = adjustColor(
-            rgb01, exposure: exposure, contrast: contrast, gamma: gamma,
-            hue: hue, saturation: saturation)
-        if let mask {
-            var m = try maskGridFromCGImage(mask, width: source.width, height: source.height)
-            if maskFeather > 0 { m = boxBlur(m, passes: maskFeather) }
-            if invertMask { m = 1 - m }
-            adjusted = compositeMasked(base: rgb01, adjusted: adjusted, mask: m)
-        }
-        let out = adjusted * 2 - 1
-        return try arrayToCGImage(out)
+        // Exact pixel-space grade at native resolution (same path as CLI `--recolor`).
+        return try applyImageOps(
+            source,
+            [.recolor(hue: hue, sat: saturation, exp: exposure, contrast: contrast, gamma: gamma)],
+            mask: mask, invertMask: invertMask, maskFeather: maskFeather)
     }
 
-    /// Model-free pixel filter: grayscale / sepia / invert / sharpen / match-color. Optionally scoped
-    /// to `mask`. Runs at the source's native resolution and loads no models.
+    /// Model-free pixel filter. Optionally scoped to `mask`. Runs at the source's native resolution
+    /// and loads no models. Supported names: `grayscale`, `sepia`, `invert`, `auto-contrast`,
+    /// `sharpen`, `blur`, `brightness`, `saturation`, `temperature`, `posterize`, `threshold`,
+    /// `vignette`, `match-color`. `amount` is the filter-specific parameter (sharpen amount,
+    /// blur passes, brightness offset, saturation multiplier, temperature, posterize levels,
+    /// threshold, vignette amount). `reference` is required for `match-color`.
     public func applyPixelFilter(
         source: CGImage, filter: String, amount: Float = 1.0, reference: CGImage? = nil,
         mask: CGImage? = nil, invertMask: Bool = false, maskFeather: Int = 2
     ) throws -> CGImage {
-        let rgb01 = (try cgImageToArray(source) + 1) / 2  // (H,W,3) in [0,1]
-        let out: MLXArray
+        let op: ImageOp
         switch filter.lowercased() {
-        case "grayscale", "gray": out = toGrayscale(rgb01)
-        case "sepia": out = toSepia(rgb01)
-        case "invert": out = invertColor(rgb01)
-        case "sharpen": out = sharpen(rgb01, amount: amount)
+        case "grayscale", "gray": op = .grayscale
+        case "sepia": op = .sepia
+        case "invert": op = .invert
+        case "auto-contrast", "autocontrast": op = .autoContrast
+        case "sharpen": op = .sharpen(amount)
+        case "blur": op = .blur(max(1, Int(amount.rounded())))
+        case "brightness": op = .brightness(amount)
+        case "saturation": op = .saturation(amount)
+        case "temperature": op = .temperature(amount)
+        case "posterize": op = .posterize(max(2, Int(amount.rounded())))
+        case "threshold": op = .threshold(amount)
+        case "vignette": op = .vignette(amount)
         case "match-color", "matchcolor":
             guard let reference else {
                 throw Flux2Error.generationFailed("match-color requires a reference image")
             }
-            out = matchColor(rgb01, reference: (try cgImageToArray(reference) + 1) / 2)
+            let base = (try cgImageToArray(source) + 1) / 2
+            let matched = matchColor(base, reference: (try cgImageToArray(reference) + 1) / 2)
+            var result = matched
+            if let mask {
+                var m = try maskGridFromCGImage(mask, width: source.width, height: source.height)
+                if maskFeather > 0 { m = boxBlur(m, passes: maskFeather) }
+                if invertMask { m = 1 - m }
+                result = compositeMasked(base: base, adjusted: matched, mask: m)
+            }
+            return try arrayToCGImage(result * 2 - 1)
         default:
-            throw Flux2Error.generationFailed("unknown filter: \(filter)")
+            throw Flux2Error.generationFailed(
+                "unknown filter: \(filter) (expected grayscale|sepia|invert|auto-contrast|sharpen|"
+                    + "blur|brightness|saturation|temperature|posterize|threshold|vignette|match-color)")
         }
-        var result = out
-        if let mask {
-            var m = try maskGridFromCGImage(mask, width: source.width, height: source.height)
-            if maskFeather > 0 { m = boxBlur(m, passes: maskFeather) }
-            if invertMask { m = 1 - m }
-            result = compositeMasked(base: rgb01, adjusted: out, mask: m)
-        }
-        return try arrayToCGImage(result * 2 - 1)
+        return try applyImageOps(
+            source, [op], mask: mask, invertMask: invertMask, maskFeather: maskFeather)
     }
 }

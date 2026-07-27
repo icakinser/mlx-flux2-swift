@@ -231,17 +231,20 @@ struct Flux2KitCLI {
                     --add-object "PROMPT"          synthesize an object in the masked region
                     --replace-background "PROMPT"  keep masked subject, regenerate the rest
                     --edit "PROMPT"                general masked edit (also: semantic recolor)
+                    --recolor "hue=..,sat=.."       pixel grade (model-free); with -p + --mask:
+                                                   diffusion semantic recolor via library API
                     --experimental-latent-color    with --recolor: latent-space A/B (unreliable)
                     --img2img                      regenerate --source from -p at --strength
                     --outpaint L,R,T,B             extend the canvas and fill the new border
                                                    (single value applies to all sides)
 
-                  masks (any inpaint mode; no external file needed):
+                  masks (inpaint modes AND model-free color/effect ops; white = apply/edit):
                     --mask FILE | --mask-box x,y,w,h | --mask-ellipse x,y,w,h   (top-left origin)
                     --mask-dilate N  --mask-erode N  --mask-feather N  --invert-mask
 
                   model-free image ops (NO model load — instant; applied in the order given, either
-                  standalone on --source or as post-processing after a generate/edit):
+                  standalone on --source or as post-processing after a generate/edit).
+                  With --mask*, color/effect ops apply only inside the mask (size-preserving ops only):
                     geometry: --resize WxH  --scale F  --crop x,y,w,h  --rotate 90|180|270
                               --flip h|v|hv  --fit-16  --pixelate N
                     color:    --brightness F  --saturation F  --temperature F  --auto-contrast
@@ -283,8 +286,15 @@ struct Flux2KitCLI {
             }
         }
 
+        let hasMaskRequest =
+            maskPath != nil || maskBox != nil || maskEllipse != nil
+        // Semantic (diffusion) recolor: --recolor with -p and a mask. Pixel grade alone stays
+        // model-free; experimental latent path keeps the raw --recolor spec.
+        let doSemanticRecolor =
+            recolorSpec != nil && prompt != nil && hasMaskRequest && !experimentalLatentColor
         let diffusionActive = doRemove || addObjectPrompt != nil || replaceBgPrompt != nil
             || editPrompt != nil || experimentalLatentColor || doImg2Img || outpaintSpec != nil
+            || doSemanticRecolor
 
         // --low-memory preset: int4 + staged unload + fp16 VAE + cache cap. Tiling is NOT auto-
         // enabled (it is lossy — FLUX's VAE has global attention); opt in with --vae-tile.
@@ -316,8 +326,9 @@ struct Flux2KitCLI {
             fail("output directory does not exist: \(outputDir.path)")
         }
 
-        // Non-experimental --recolor is a model-free pixel op; fold it into the op chain.
-        if let spec = recolorSpec, !experimentalLatentColor {
+        // Non-experimental --recolor without -p is a model-free pixel op; fold it into the op chain.
+        // With -p + mask it becomes diffusion semantic recolor (handled below).
+        if let spec = recolorSpec, !experimentalLatentColor, !doSemanticRecolor {
             let rc = parseRecolorArg(spec)
             for w in rc.warnings {
                 FileHandle.standardError.write(Data("warning: \(w)\n".utf8))
@@ -331,6 +342,32 @@ struct Flux2KitCLI {
         if seedsList != nil && numImages > 1 {
             FileHandle.standardError.write(
                 Data("warning: --num ignored because --seeds was given\n".utf8))
+        }
+        if invertMask && doRemove {
+            FileHandle.standardError.write(
+                Data("warning: --invert-mask ignored for --remove (mask marks the object to remove)\n"
+                    .utf8))
+        }
+        if invertMask && addObjectPrompt != nil {
+            FileHandle.standardError.write(
+                Data("warning: --invert-mask ignored for --add-object (mask marks where to add)\n"
+                    .utf8))
+        }
+        if invertMask && replaceBgPrompt != nil {
+            FileHandle.standardError.write(
+                Data(
+                    "warning: --invert-mask ignored for --replace-background (mask marks subject to keep)\n"
+                        .utf8))
+        }
+        if doSemanticRecolor {
+            // Grade keys in the --recolor string are unused for the diffusion path.
+            let rc = parseRecolorArg(recolorSpec ?? "")
+            if rc.hue != 0 || rc.sat != 1 || rc.exp != 0 || rc.contrast != 1 || rc.gamma != 1 {
+                FileHandle.standardError.write(
+                    Data(
+                        "warning: --recolor grade keys ignored for semantic recolor; use --edit or drop -p for pixel grade\n"
+                            .utf8))
+            }
         }
 
         // Opt-in weight download from the Hugging Face Hub.
@@ -358,14 +395,47 @@ struct Flux2KitCLI {
             if ops.isEmpty && !diffusionActive && prompt == nil { return }
         }
 
+        /// Resolve --mask / --mask-box / --mask-ellipse (+ dilate/erode) against a source image.
+        func resolveMask(for source: CGImage) throws -> CGImage? {
+            var resolved: CGImage?
+            if let maskPath {
+                resolved = try loadImages([URL(fileURLWithPath: maskPath)]).first
+            } else if let spec = maskBox {
+                let r = parse4("--mask-box", spec)
+                resolved = try makeBoxMask(
+                    width: source.width, height: source.height, x: r.0, y: r.1, boxWidth: r.2,
+                    boxHeight: r.3)
+            } else if let spec = maskEllipse {
+                let r = parse4("--mask-ellipse", spec)
+                resolved = try makeEllipseMask(
+                    width: source.width, height: source.height, x: r.0, y: r.1, boxWidth: r.2,
+                    boxHeight: r.3)
+            }
+            if let m = resolved, let d = maskDilate {
+                resolved = try dilateMask(m, iterations: d)
+            }
+            if let m = resolved, let e = maskErode {
+                resolved = try erodeMask(m, iterations: e)
+            }
+            return resolved
+        }
+
+        let opsFeather = maskFeather ?? 2
+
         // MODEL-FREE FAST PATH: only geometry/color/effect ops on a source → no pipeline, no model.
+        // --mask* scopes color/effect results via applyImageOps compositing.
         if !ops.isEmpty && !diffusionActive && prompt == nil {
             guard let sourcePath else { fail("image ops require --source PATH") }
             do {
                 guard let src = try loadImages([URL(fileURLWithPath: sourcePath)]).first else {
                     fail("could not load --source image")
                 }
-                let out = try applyImageOps(src, ops)
+                let mask = try resolveMask(for: src)
+                if hasMaskRequest && mask == nil {
+                    fail("could not load/build --mask")
+                }
+                let out = try applyImageOps(
+                    src, ops, mask: mask, invertMask: invertMask, maskFeather: opsFeather)
                 let url = URL(
                     fileURLWithPath: "\((output as NSString).deletingPathExtension).\(format)")
                 try saveImage(out, to: url, format: format, quality: quality)
@@ -375,6 +445,13 @@ struct Flux2KitCLI {
                 exit(1)
             }
             return
+        }
+
+        if hasMaskRequest && !ops.isEmpty && !diffusionActive && prompt != nil {
+            FileHandle.standardError.write(
+                Data(
+                    "warning: --mask with model-free ops is ignored when -p is set without an edit mode; drop -p for masked filters\n"
+                        .utf8))
         }
 
         // Seeds to run (multi-seed batch). Deterministic ops collapse to one below.
@@ -433,33 +510,22 @@ struct Flux2KitCLI {
             }
             let refImages = inputs.isEmpty
                 ? nil : try loadImages(inputs.map { URL(fileURLWithPath: $0) })
-            let feather = maskFeather ?? 1
 
             // Resolve the edit mask from a file, a generated box/ellipse, then dilate/erode.
             var resolvedMask: CGImage?
             if let s = srcImg {
-                if let maskPath {
-                    resolvedMask = try loadImages([URL(fileURLWithPath: maskPath)]).first
-                } else if let spec = maskBox {
-                    let r = parse4("--mask-box", spec)
-                    resolvedMask = try makeBoxMask(
-                        width: s.width, height: s.height, x: r.0, y: r.1, boxWidth: r.2, boxHeight: r.3)
-                } else if let spec = maskEllipse {
-                    let r = parse4("--mask-ellipse", spec)
-                    resolvedMask = try makeEllipseMask(
-                        width: s.width, height: s.height, x: r.0, y: r.1, boxWidth: r.2, boxHeight: r.3)
-                }
-                if let m = resolvedMask, let d = maskDilate {
-                    resolvedMask = try dilateMask(m, iterations: d)
-                }
-                if let m = resolvedMask, let e = maskErode {
-                    resolvedMask = try erodeMask(m, iterations: e)
-                }
+                resolvedMask = try resolveMask(for: s)
             }
             func requireMask() -> CGImage {
                 if let resolvedMask { return resolvedMask }
                 fail("this mode requires --mask FILE, --mask-box x,y,w,h, or --mask-ellipse x,y,w,h")
             }
+
+            // Mode-specific feather defaults match the library when --mask-feather is omitted.
+            let editFeather = maskFeather ?? 1
+            let removeReplaceFeather = maskFeather ?? 2
+            let outpaintFeather = maskFeather ?? 2
+            let semanticRecolorFeather = maskFeather ?? 2
 
             let guidanceSchedule: GuidanceSchedule =
                 guidanceEnd.map { .linear(end: $0) } ?? .constant
@@ -471,8 +537,8 @@ struct Flux2KitCLI {
                         return try pipeline.generateOutpaint(
                             source: src, prompt: prompt ?? "", left: l, right: r, top: t, bottom: b,
                             strength: strength ?? 0.95, numSteps: steps, guidance: guidance,
-                            seed: curSeed, verbose: verbose, evalFreq: evalFreq,
-                            sampler: sampler, guidanceSchedule: guidanceSchedule)
+                            seed: curSeed, maskFeather: outpaintFeather, verbose: verbose,
+                            evalFreq: evalFreq, sampler: sampler, guidanceSchedule: guidanceSchedule)
                     }
                     if doImg2Img {
                         guard let p = prompt else { fail("--img2img requires -p PROMPT") }
@@ -498,22 +564,22 @@ struct Flux2KitCLI {
                         return try pipeline.removeObject(
                             source: src, mask: requireMask(), strength: strength ?? 0.9,
                             width: width, height: height, numSteps: steps, guidance: guidance,
-                            seed: curSeed, maskFeather: feather, verbose: verbose, evalFreq: evalFreq,
-                            sampler: sampler, guidanceSchedule: guidanceSchedule)
+                            seed: curSeed, maskFeather: removeReplaceFeather, verbose: verbose,
+                            evalFreq: evalFreq, sampler: sampler, guidanceSchedule: guidanceSchedule)
                     }
                     if let addObjectPrompt {
                         return try pipeline.addObject(
                             source: src, mask: requireMask(), prompt: addObjectPrompt,
                             referenceImage: refImages?.first, strength: strength ?? 0.85,
                             width: width, height: height, numSteps: steps, guidance: guidance,
-                            seed: curSeed, maskFeather: feather, verbose: verbose, evalFreq: evalFreq,
-                            sampler: sampler, guidanceSchedule: guidanceSchedule)
+                            seed: curSeed, maskFeather: editFeather, verbose: verbose,
+                            evalFreq: evalFreq, sampler: sampler, guidanceSchedule: guidanceSchedule)
                     }
                     if let replaceBgPrompt {
                         return try pipeline.replaceBackground(
                             source: src, subjectMask: requireMask(), prompt: replaceBgPrompt,
                             strength: strength ?? 0.9, width: width, height: height, numSteps: steps,
-                            guidance: guidance, seed: curSeed, maskFeather: feather,
+                            guidance: guidance, seed: curSeed, maskFeather: removeReplaceFeather,
                             verbose: verbose, evalFreq: evalFreq, sampler: sampler,
                             guidanceSchedule: guidanceSchedule)
                     }
@@ -522,8 +588,18 @@ struct Flux2KitCLI {
                             source: src, mask: requireMask(), prompt: editPrompt,
                             strength: strength ?? 0.85, width: width, height: height, numSteps: steps,
                             guidance: guidance, seed: curSeed, invertMask: invertMask,
-                            maskFeather: feather, verbose: verbose, evalFreq: evalFreq,
+                            maskFeather: editFeather, verbose: verbose, evalFreq: evalFreq,
                             sampler: sampler, guidanceSchedule: guidanceSchedule)
+                    }
+                    if doSemanticRecolor {
+                        guard let p = prompt else { fail("semantic --recolor requires -p PROMPT") }
+                        return try pipeline.recolor(
+                            source: src, mask: requireMask(), prompt: p,
+                            strength: strength ?? 0.7, width: width, height: height,
+                            numSteps: steps, guidance: guidance, seed: curSeed,
+                            invertMask: invertMask, maskFeather: semanticRecolorFeather,
+                            verbose: verbose, evalFreq: evalFreq, sampler: sampler,
+                            guidanceSchedule: guidanceSchedule)
                     }
                     fail("no editing operation matched")
                 }
@@ -541,7 +617,12 @@ struct Flux2KitCLI {
             let base = (output as NSString).deletingPathExtension
             for (i, s) in runSeeds.enumerated() {
                 var img = try runOnce(s)
-                if !ops.isEmpty { img = try applyImageOps(img, ops) }  // model-free post-processing
+                if !ops.isEmpty {
+                    // Post-process with the same mask scoping as the model-free fast path.
+                    img = try applyImageOps(
+                        img, ops, mask: resolvedMask, invertMask: invertMask,
+                        maskFeather: opsFeather)
+                }
                 // 2026-07-26 EDT | PERMANENT — Lanczos-equivalent upscale for game asset workflows
                 if upscale > 1 {
                     img = try resizeHighQuality(img, width: img.width * upscale, height: img.height * upscale)

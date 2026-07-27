@@ -233,6 +233,8 @@ swift run -c release flux2kit-cli --source car.png --mask car.png \
 # exact pixel-space color grade (global, or within --mask); no model call
 swift run -c release flux2kit-cli --source photo.png \
   --recolor "exp=0.3,contrast=1.1,sat=1.2,hue=0.02" --output out.png
+swift run -c release flux2kit-cli --source knight.png --mask armor.png \
+  --temperature 2.5 --saturation 3 --output out.png
 ```
 
 More modes and options:
@@ -249,10 +251,12 @@ flux2kit-cli --source in.png --mask-box 176,150,170,200 --edit "a green apple" -
 flux2kit-cli --source in.png --mask-ellipse 180,160,150,180 --mask-dilate 3 --edit "…" --output out.png
 
 # model-free image ops — NO model load (instant, ~50 ms, ~50 MB). Run standalone on a --source,
-# or chain after a generate/edit. Applied in the order given.
+# or chain after a generate/edit. Applied in the order given. Pass --mask* to scope color/effect
+# ops to a region (geometry that changes size is rejected when a mask is set).
 flux2kit-cli --source in.png --resize 768x512 --output out.png       # geometry: also --scale --crop
 flux2kit-cli --source in.png --rotate 90 --flip h --fit-16 --output out.png
 flux2kit-cli --source in.png --grayscale --output out.png            # effects: --sepia --invert
+flux2kit-cli --source in.png --mask subject.png --temperature 1 --saturation 2 --output out.png
 flux2kit-cli --source in.png --posterize 4 --threshold 0.5 --pixelate 8 --vignette 0.5 --output out.png
 flux2kit-cli --source in.png --brightness 0.1 --temperature 0.3 --saturation 1.2 --auto-contrast --output out.png
 flux2kit-cli --source in.png --sharpen 1.5 --blur 2 --match-color ref.png --output out.png
