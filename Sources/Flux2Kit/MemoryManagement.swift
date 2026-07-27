@@ -11,7 +11,7 @@ import MLXNN
 
 /// Whether sub-models stay resident for the pipeline's lifetime (fast for repeated generations) or
 /// are freed after each stage (lowest peak memory, single-shot friendly).
-public enum ResidencyPolicy: Sendable {
+public enum ResidencyPolicy: Sendable, Equatable {
     case keepResident
     case unloadAfterUse
 }

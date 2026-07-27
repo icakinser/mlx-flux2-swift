@@ -17,6 +17,7 @@ public enum Flux2Error: Error, LocalizedError {
     case generationFailed(String)
     case duplicateWeightKeys(String)
     case missingWeights(String)
+    case cancelled
 
     public var errorDescription: String? {
         switch self {
@@ -26,6 +27,7 @@ public enum Flux2Error: Error, LocalizedError {
         case .generationFailed(let message): return "Generation failed: \(message)"
         case .duplicateWeightKeys(let message): return "Duplicate weight keys: \(message)"
         case .missingWeights(let message): return "Missing weights: \(message)"
+        case .cancelled: return "Generation cancelled"
         }
     }
 }
@@ -33,19 +35,19 @@ public enum Flux2Error: Error, LocalizedError {
 // MARK: - Config structs
 
 /// Configuration for the Flux2 transformer.
-public struct Flux2Config: Sendable {
-    public var inChannels: Int
-    public var contextInDim: Int
-    public var hiddenSize: Int
-    public var numHeads: Int
-    public var depth: Int
-    public var depthSingleBlocks: Int
-    public var axesDim: [Int]
-    public var theta: Float
-    public var mlpRatio: Float
-    public var useGuidanceEmbed: Bool
+package struct Flux2Config: Sendable {
+    package var inChannels: Int
+    package var contextInDim: Int
+    package var hiddenSize: Int
+    package var numHeads: Int
+    package var depth: Int
+    package var depthSingleBlocks: Int
+    package var axesDim: [Int]
+    package var theta: Float
+    package var mlpRatio: Float
+    package var useGuidanceEmbed: Bool
 
-    public init(
+    package init(
         inChannels: Int,
         contextInDim: Int,
         hiddenSize: Int,
@@ -71,21 +73,21 @@ public struct Flux2Config: Sendable {
 }
 
 /// Configuration for the VAE.
-public struct VAEConfig: Sendable {
-    public var resolution: Int
-    public var inChannels: Int
-    public var ch: Int
-    public var outCh: Int
-    public var chMult: [Int]
-    public var numResBlocks: Int
-    public var zChannels: Int
-    public var normNumGroups: Int
-    public var bnEps: Float
-    public var bnMomentum: Float
-    public var ps: (Int, Int)
-    public var forceUpcast: Bool
+package struct VAEConfig: Sendable {
+    package var resolution: Int
+    package var inChannels: Int
+    package var ch: Int
+    package var outCh: Int
+    package var chMult: [Int]
+    package var numResBlocks: Int
+    package var zChannels: Int
+    package var normNumGroups: Int
+    package var bnEps: Float
+    package var bnMomentum: Float
+    package var ps: (Int, Int)
+    package var forceUpcast: Bool
 
-    public init(
+    package init(
         resolution: Int,
         inChannels: Int,
         ch: Int,
@@ -115,24 +117,24 @@ public struct VAEConfig: Sendable {
 }
 
 /// Configuration for the Qwen3 text encoder.
-public struct Qwen3Config: Sendable {
-    public var modelType: String
-    public var hiddenSize: Int
-    public var numHiddenLayers: Int
-    public var intermediateSize: Int
-    public var numAttentionHeads: Int
-    public var numKeyValueHeads: Int
-    public var headDim: Int
-    public var rmsNormEps: Float
-    public var vocabSize: Int
-    public var maxPositionEmbeddings: Int
-    public var ropeTheta: Float
-    public var tieWordEmbeddings: Bool
+package struct Qwen3Config: Sendable {
+    package var modelType: String
+    package var hiddenSize: Int
+    package var numHiddenLayers: Int
+    package var intermediateSize: Int
+    package var numAttentionHeads: Int
+    package var numKeyValueHeads: Int
+    package var headDim: Int
+    package var rmsNormEps: Float
+    package var vocabSize: Int
+    package var maxPositionEmbeddings: Int
+    package var ropeTheta: Float
+    package var tieWordEmbeddings: Bool
     // Optional dictionary; only numeric entries are retained.
     // FLUX.2-klein-4B ships "rope_scaling": null and it is never read.
-    public var ropeScaling: [String: Double]?
+    package var ropeScaling: [String: Double]?
 
-    public init(
+    package init(
         modelType: String,
         hiddenSize: Int,
         numHiddenLayers: Int,
@@ -225,7 +227,7 @@ private func boolValue(_ data: [String: Any], _ key: String, default defaultValu
 // MARK: - Config loaders
 
 /// Loads the Flux2 transformer configuration from a JSON config file.
-public func loadFlux2Config(_ path: URL) throws -> Flux2Config {
+package func loadFlux2Config(_ path: URL) throws -> Flux2Config {
     let data = try loadJSONObject(path)
     let numHeads = try intValue(data, "num_attention_heads", path)
     let attentionHeadDim = try intValue(data, "attention_head_dim", path)
@@ -245,7 +247,7 @@ public func loadFlux2Config(_ path: URL) throws -> Flux2Config {
 }
 
 /// Loads the VAE configuration from a JSON config file.
-public func loadVaeConfig(_ path: URL) throws -> VAEConfig {
+package func loadVaeConfig(_ path: URL) throws -> VAEConfig {
     let data = try loadJSONObject(path)
     let blockOutChannels = try intArrayValue(data, "block_out_channels", path)
     guard let firstBlockOut = blockOutChannels.first, firstBlockOut != 0 else {
@@ -273,7 +275,7 @@ public func loadVaeConfig(_ path: URL) throws -> VAEConfig {
 }
 
 /// Loads the Qwen3 text encoder configuration from a JSON config file.
-public func loadQwen3Config(_ path: URL) throws -> Qwen3Config {
+package func loadQwen3Config(_ path: URL) throws -> Qwen3Config {
     let data = try loadJSONObject(path)
     let hiddenSize = try intValue(data, "hidden_size", path)
     let numAttentionHeads = try intValue(data, "num_attention_heads", path)
@@ -320,17 +322,17 @@ public func loadQwen3Config(_ path: URL) throws -> Qwen3Config {
 /// DEFAULT_REPO_ID
 public let defaultRepoId = "black-forest-labs/FLUX.2-klein-4B"
 /// WEIGHT_FILES (probe order matters)
-public let weightFiles: [String] = [
+package let weightFiles: [String] = [
     "flux-2-klein-4b-fp8.safetensors",
     "flux-2-klein-4b.safetensors",
     "flux-2-klein-base-4b.safetensors",
 ]
 /// TOKENIZER_FALLBACK_DIR
-public let tokenizerFallbackDir = "FLUX.2-klein-base-4B"
+package let tokenizerFallbackDir = "FLUX.2-klein-base-4B"
 /// TEXT_ENCODER_MAX_LENGTH
-public let textEncoderMaxLength = 512
+package let textEncoderMaxLength = 512
 /// TEXT_ENCODER_OUTPUT_LAYERS — layers (9, 18, 27)
-public let textEncoderOutputLayers: [Int] = [9, 18, 27]
+package let textEncoderOutputLayers: [Int] = [9, 18, 27]
 /// DEFAULT_WIDTH
 public let defaultWidth = 512
 /// DEFAULT_HEIGHT
@@ -342,10 +344,10 @@ public let defaultGuidance: Float = 1.0
 /// DEFAULT_DTYPE
 public let defaultDtype = "bfloat16"
 /// DEFAULT_QUANTIZE
-public let defaultQuantize = "none"
+package let defaultQuantize = "none"
 /// DEFAULT_OUTPUT
-public let defaultOutput = "output.png"
+package let defaultOutput = "output.png"
 /// REF_IMAGE_LIMIT_PIXELS_SINGLE = 2048**2
-public let refImageLimitPixelsSingle = 2048 * 2048
+package let refImageLimitPixelsSingle = 2048 * 2048
 /// REF_IMAGE_LIMIT_PIXELS_MULTI = 1024**2
-public let refImageLimitPixelsMulti = 1024 * 1024
+package let refImageLimitPixelsMulti = 1024 * 1024

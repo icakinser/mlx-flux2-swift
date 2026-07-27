@@ -8,10 +8,10 @@ import MLXNN
 import Tokenizers
 
 // Layer indices at which hidden states are tapped for the encoder output.
-public let outputLayersQwen3 = textEncoderOutputLayers
+package let outputLayersQwen3 = textEncoderOutputLayers
 
 // FastRMSNorm (HF weight key "weight")
-public final class Qwen3RMSNorm: Module {
+package final class Qwen3RMSNorm: Module {
 
     @ParameterInfo(key: "weight") public var weight: MLXArray
     public let eps: Float
@@ -28,7 +28,7 @@ public final class Qwen3RMSNorm: Module {
 }
 
 // Fused qkv projection (see fuseQkvWeights)
-public final class Qwen3Attention: Module {
+package final class Qwen3Attention: Module {
 
     public let safeAttn: Bool
     public let nHeads: Int
@@ -113,7 +113,7 @@ public final class Qwen3Attention: Module {
 }
 
 // Qwen3 MLP block (SwiGLU: silu(gate) * up, then down projection).
-public final class Qwen3MLP: Module {
+package final class Qwen3MLP: Module {
 
     @ModuleInfo(key: "gate_proj") public var gateProj: Linear
     @ModuleInfo(key: "up_proj") public var upProj: Linear
@@ -132,7 +132,7 @@ public final class Qwen3MLP: Module {
 }
 
 // Transformer block: self-attention + MLP with pre-norm.
-public final class Qwen3Block: Module {
+package final class Qwen3Block: Module {
 
     @ModuleInfo(key: "self_attn") public var selfAttn: Qwen3Attention
     @ModuleInfo(key: "mlp") public var mlp: Qwen3MLP
@@ -154,7 +154,7 @@ public final class Qwen3Block: Module {
 }
 
 // Taps hidden states at layers 9/18/27
-public final class Qwen3Backbone: Module {
+package final class Qwen3Backbone: Module {
 
     public let cfg: Qwen3Config
 
@@ -199,7 +199,7 @@ public final class Qwen3Backbone: Module {
 }
 
 // Top-level Qwen3 model wrapping the backbone.
-public final class Qwen3Model: Module {
+package final class Qwen3Model: Module {
 
     @ModuleInfo(key: "model") public var model: Qwen3Backbone
 
@@ -214,7 +214,7 @@ public final class Qwen3Model: Module {
 }
 
 // Plain class, not a Module
-public final class Qwen3Embedder {
+package final class Qwen3Embedder {
 
     public let cfg: Qwen3Config
     public let model: Qwen3Model
@@ -253,7 +253,7 @@ private func causalTriangle(_ l: Int) -> MLXArray {
 }
 
 // Builds a causal-only attention mask.
-public func buildCausalOnlyMask(_ l: Int, dtype: DType) -> MLXArray {
+package func buildCausalOnlyMask(_ l: Int, dtype: DType) -> MLXArray {
     let causal = causalTriangle(l)
     let neg = negInf(dtype)
     let zero = MLXArray(0).asType(dtype)
@@ -262,7 +262,7 @@ public func buildCausalOnlyMask(_ l: Int, dtype: DType) -> MLXArray {
 }
 
 // Builds a causal mask combined with padding.
-public func buildCausalPaddingMask(_ attentionMask: MLXArray, dtype: DType = .float32) -> MLXArray {
+package func buildCausalPaddingMask(_ attentionMask: MLXArray, dtype: DType = .float32) -> MLXArray {
     let l = attentionMask.dim(1)
 
     // Fast path: no padding anywhere (host sync intentional)
@@ -287,7 +287,7 @@ public func buildCausalPaddingMask(_ attentionMask: MLXArray, dtype: DType = .fl
 // (single user message, add_generation_prompt=true, enable_thinking=false),
 // Models/FLUX-2/tokenizer/chat_template.jinja renders to the exact string below — verified
 // against the reference implementation (repr-compared, token ids golden-tested in Flux2KitTests).
-public final class Qwen3Tokenizer {
+package final class Qwen3Tokenizer {
 
     public let tokenizer: any Tokenizer
     public let padId: Int

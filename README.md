@@ -53,7 +53,7 @@ For generation, grab the weights (`flux2kit-cli --download`, or bring your own) 
 ## Requirements
 
 - Apple Silicon Mac (M-series)
-- macOS 26+
+- macOS 14+
 - Xcode 26 toolchain (needed to build the MLX Metal shader library — see note below)
 - A FLUX.2 [klein] snapshot from [`black-forest-labs/FLUX.2-klein-4B`](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B) (Apache-2.0) — fetch it with `--download` or bring your own
 
@@ -184,6 +184,9 @@ FLUX2_REPO=/path/to/Models/FLUX-2 swift run Flux2KitExample # text-to-image
 See [`Docs/Library.md`](Docs/Library.md) for the stable API, progress callback, threading, and memory
 contract. External SwiftPM apps should also follow
 [`Docs/ConsumerSetup.md`](Docs/ConsumerSetup.md) to stage the MLX metallib beside their executable.
+An application-oriented SwiftUI sample with progress, cancellation, repeated generation, and
+reference-image import lives in
+[`Examples/Flux2KitSwiftUIExample`](Examples/Flux2KitSwiftUIExample).
 
 ## ComfyUI
 

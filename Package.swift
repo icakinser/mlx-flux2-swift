@@ -10,7 +10,8 @@ import PackageDescription
 let package = Package(
     name: "Flux2Kit",
     platforms: [
-        .macOS(.v26)
+        // Matches the pinned mlx-swift deployment floor. Building still requires Swift 6.2.
+        .macOS(.v14)
     ],
     products: [
         .library(
@@ -56,7 +57,7 @@ let package = Package(
             name: "Flux2KitTests",
             dependencies: ["Flux2Kit"],
             path: "Tests/Flux2KitTests",
-            // Golden reference artifacts (parity image + docs), not runtime resources.
+            // Tests locate checked-in goldens from #filePath; they are not copied into the bundle.
             exclude: ["Fixtures"]
         ),
     ]

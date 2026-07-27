@@ -34,7 +34,7 @@ package func applyLatentCurve(
 extension Flux2Pipeline {
     /// EXPERIMENTAL: encode → apply a latent-space curve → decode, with NO denoising. Demonstrates
     /// (usually poorly) what latent color ops do. Provided for A/B against the pixel-space path.
-    public func experimentalLatentColor(
+    package func experimentalLatentColor(
         source: CGImage, width: Int, height: Int,
         exposure: Float = 0, contrast: Float = 1, gamma: Float = 1
     ) throws -> CGImage {

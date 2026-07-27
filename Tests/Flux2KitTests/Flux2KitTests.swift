@@ -161,6 +161,28 @@ private func onCPUThrows(_ body: () throws -> Void) throws {
     #expect(abs(linear.value(step: 1, totalSteps: 4, start: 4.0) - 3.0) < 1e-12)
 }
 
+@Test func generationCancellationIsThreadSafeAndSticky() {
+    let cancellation = GenerationCancellation()
+    #expect(!cancellation.isCancelled)
+    cancellation.cancel()
+    #expect(cancellation.isCancelled)
+    cancellation.cancel()
+    #expect(cancellation.isCancelled)
+}
+
+@Test func publicOptionTypesHaveStableDefaults() {
+    let pipeline = PipelineConfiguration.lowMemory()
+    #expect(pipeline.quantize == "int4")
+    #expect(pipeline.residency == .unloadAfterUse)
+    #expect(pipeline.cacheLimitMB == 512)
+    #expect(pipeline.vaeTileLatent == nil)
+
+    let denoise = DenoiseOptions()
+    #expect(denoise.numSteps == defaultSteps)
+    #expect(denoise.sampler == .euler)
+    #expect(denoise.guidanceSchedule == .constant)
+}
+
 /// RGB → HSV → RGB is an identity (within float tolerance), including gray/black/white edge cases.
 @Test(.enabled(if: mlxTestsEnabled)) func hsvRoundTrip() {
     onCPU {

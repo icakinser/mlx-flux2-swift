@@ -5,17 +5,18 @@ public API an application uses.
 
 ## Stable public surface
 
-- `Flux2Pipeline`, `GenerationOptions`, `GenerationProgress`
+- `Flux2Pipeline`, `PipelineConfiguration`, `GenerationOptions`, `GenerationProgress`
+- `DenoiseOptions`, `ImageToImageOptions`, `InpaintOptions`, `OutpaintOptions`
+- `GenerationCancellation`
 - `Sampler`, `GuidanceSchedule`, `ResidencyPolicy`
 - Text-to-image, img2img, inpaint, outpaint, and editing methods on `Flux2Pipeline`
 - `ImageOp`, `FlipMode`, `applyImageOps`
-- Image loading, saving, conversion, preparation, and `resizeHighQuality`
+- Image loading, saving, and `resizeHighQuality`
 - `Flux2Error`
 - Model download helpers
 
-Transformer/VAE implementation types remain source-visible for compatibility with the original port,
-but applications should treat them as implementation details. Weight conversion, denoise internals,
-memory plumbing, and CLI parsers are package-scoped.
+Transformer, VAE, text-encoder, MLX conversion/math, weight conversion, denoise, memory, and CLI
+implementation details are package-scoped.
 
 ## Basic generation
 
@@ -23,9 +24,10 @@ memory plumbing, and CLI parsers are package-scoped.
 import Flux2Kit
 
 let pipeline = try await Flux2Pipeline(
-    repoPath: modelURL,
-    compile: false,
-    residency: .keepResident)
+    configuration: PipelineConfiguration(
+        repoPath: modelURL,
+        compile: false,
+        residency: .keepResident))
 
 var options = GenerationOptions(
     prompt: "a red bicycle leaning against a stone wall, golden hour",
@@ -39,6 +41,8 @@ var options = GenerationOptions(
 options.progress = { progress in
     print("step \(progress.step + 1)/\(progress.totalSteps)")
 }
+let cancellation = GenerationCancellation()
+options.cancellation = cancellation
 
 let image = try pipeline.generate(options)
 try savePNG(image, to: outputURL)
@@ -64,6 +68,14 @@ state is process-global. For true parallel generation, use separate processes.
 
 The progress callback is `@Sendable` and is invoked synchronously after each completed denoise step.
 Dispatch UI work to the main actor from the callback when integrating with AppKit or SwiftUI.
+
+Cancellation is cooperative: call `GenerationCancellation.cancel()` from any thread. Flux2Kit checks
+the token before each denoise step and throws `Flux2Error.cancelled`; a model forward already in
+flight is allowed to finish.
+
+All generation modes use the same internal execution engine. Sampler, guidance schedule, evaluation
+frequency, progress, cancellation, and pipeline-level compile policy therefore behave consistently
+for text-to-image, img2img, inpaint, outpaint, and editing wrappers.
 
 ## Quality contract
 

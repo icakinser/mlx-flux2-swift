@@ -35,10 +35,15 @@ extension Flux2Pipeline {
         invertMask: Bool = false,
         maskFeather: Int = 1,
         verbose: Bool = false,
-        evalFreq: Int = 1
+        evalFreq: Int = 1,
+        sampler: Sampler = .euler,
+        guidanceSchedule: GuidanceSchedule = .constant,
+        progress: (@Sendable (GenerationProgress) -> Void)? = nil,
+        cancellation: GenerationCancellation? = nil
     ) throws -> CGImage {
         generationLock.lock()
         defer { generationLock.unlock() }
+        if cancellation?.isCancelled == true { throw Flux2Error.cancelled }
         guard width > 0, height > 0, width % 16 == 0, height % 16 == 0 else {
             throw Flux2Error.generationFailed(
                 "width and height must be positive multiples of 16 (got \(width)x\(height))")
@@ -135,27 +140,29 @@ extension Flux2Pipeline {
         let peX = model.peEmbedder(imgInputIds)
         let peCtx = model.peEmbedder(ctxIds)
 
-        let modelFn: Flux2ModelFn = { [model] x, xIds, t, ctx, ctxIds, g, peX, peCtx, txtEmb, gEmb in
-            model(x, xIds, t, ctx, ctxIds, g, peX, peCtx, txtEmb, gEmb)
-        }
-        let modelFnCfg: Flux2ModelCfgFn = { [model] x, xIds, t, ctx, ctxIds, peX, peCtx, txtEmb in
-            model(x, xIds, t, ctx, ctxIds, nil, peX, peCtx, txtEmb, nil)
-        }
-
-        if guidanceDistilled {
-            x = denoise(
-                model, x, xIds, ctx, ctxIds,
-                timesteps: timesteps, guidance: guidance,
-                imgCondSeq: imgCondSeq, imgCondSeqIds: imgCondSeqIds,
-                peX: peX, peCtx: peCtx, modelFn: modelFn, evalFreq: evalFreq, postStep: blend)
-        } else {
-            x = denoiseCfg(
-                model, x, xIds, ctx, ctxIds,
-                timesteps: timesteps, guidance: guidance,
-                imgCondSeq: imgCondSeq, imgCondSeqIds: imgCondSeqIds,
-                peX: peX, peCtx: peCtx, modelFn: modelFn, modelFnCfg: modelFnCfg,
-                evalFreq: evalFreq, postStep: blend)
-        }
+        x = try executeDenoise(
+            model: model,
+            request: DenoiseRequest(
+                image: x,
+                imageIds: xIds,
+                text: ctx,
+                textIds: ctxIds,
+                timesteps: timesteps,
+                guidance: guidance,
+                guidanceDistilled: guidanceDistilled,
+                imageCondition: imgCondSeq,
+                imageConditionIds: imgCondSeqIds,
+                positionImage: peX,
+                positionText: peCtx,
+                postStep: blend),
+            options: DenoiseExecutionOptions(
+                sampler: sampler,
+                guidanceSchedule: guidanceSchedule,
+                evalFrequency: evalFreq,
+                verbose: verbose,
+                progress: progress,
+                cancellation: cancellation))
+        if cancellation?.isCancelled == true { throw Flux2Error.cancelled }
 
         return try scatterAndDecodeToImage(x, xIds: xIds)
     }

@@ -9,26 +9,26 @@ import MLX
 // MARK: - Curves (elementwise, RGB in [0,1])
 
 /// Exposure in stops: multiply by 2^stops.
-public func applyExposure(_ rgb: MLXArray, stops: Float) -> MLXArray {
+package func applyExposure(_ rgb: MLXArray, stops: Float) -> MLXArray {
     if stops == 0 { return rgb }
     return clip(rgb * MLXArray(Float(pow(2.0, Double(stops)))), min: 0, max: 1)
 }
 
 /// Contrast around mid-gray 0.5. `c == 1` is identity.
-public func applyContrast(_ rgb: MLXArray, _ c: Float) -> MLXArray {
+package func applyContrast(_ rgb: MLXArray, _ c: Float) -> MLXArray {
     if c == 1 { return rgb }
     return clip((rgb - 0.5) * c + 0.5, min: 0, max: 1)
 }
 
 /// Gamma: output = input^(1/gamma). `gamma > 1` brightens mid-tones. `gamma == 1` is identity.
-public func applyGamma(_ rgb: MLXArray, _ gamma: Float) -> MLXArray {
+package func applyGamma(_ rgb: MLXArray, _ gamma: Float) -> MLXArray {
     if gamma == 1 { return rgb }
     let g = max(gamma, 1e-4)
     return MLX.pow(clip(rgb, min: 0, max: 1), MLXArray(Float(1.0 / g)))
 }
 
 /// Rotate hue by `hue` (fraction of the wheel, [0,1)) and scale saturation by `saturation`.
-public func applyHueSaturation(_ rgb: MLXArray, hue: Float, saturation: Float) -> MLXArray {
+package func applyHueSaturation(_ rgb: MLXArray, hue: Float, saturation: Float) -> MLXArray {
     if hue == 0 && saturation == 1 { return rgb }
     var (h, s, v) = rgbToHsv(rgb)
     if hue != 0 {
@@ -42,7 +42,7 @@ public func applyHueSaturation(_ rgb: MLXArray, hue: Float, saturation: Float) -
 }
 
 /// Apply the full grade in a fixed order: exposure → contrast → gamma → hue/saturation.
-public func adjustColor(
+package func adjustColor(
     _ rgb: MLXArray, exposure: Float, contrast: Float, gamma: Float, hue: Float, saturation: Float
 ) -> MLXArray {
     var x = rgb
@@ -55,7 +55,7 @@ public func adjustColor(
 
 /// Composite `adjusted` over `base` within a (H,W) mask (1 = fully adjusted). `base`/`adjusted`
 /// are (H,W,3); the mask broadcasts over the channel axis.
-public func compositeMasked(base: MLXArray, adjusted: MLXArray, mask: MLXArray) -> MLXArray {
+package func compositeMasked(base: MLXArray, adjusted: MLXArray, mask: MLXArray) -> MLXArray {
     let m = expandedDimensions(mask, axis: -1)  // (H,W,1)
     return base * (1 - m) + adjusted * m
 }
@@ -63,7 +63,7 @@ public func compositeMasked(base: MLXArray, adjusted: MLXArray, mask: MLXArray) 
 // MARK: - RGB <-> HSV (elementwise; rgb is (H,W,3) in [0,1])
 
 /// Returns (h, s, v), each (H,W), all in [0,1].
-public func rgbToHsv(_ rgb: MLXArray) -> (MLXArray, MLXArray, MLXArray) {
+package func rgbToHsv(_ rgb: MLXArray) -> (MLXArray, MLXArray, MLXArray) {
     let r = rgb[0..., 0..., 0]
     let g = rgb[0..., 0..., 1]
     let b = rgb[0..., 0..., 2]
@@ -97,7 +97,7 @@ private func channelStats(_ rgb: MLXArray) -> (mean: MLXArray, std: MLXArray) {
 }
 
 /// Reinhard color transfer: shift `source` to the per-channel mean/std of `reference`.
-public func matchColor(_ source: MLXArray, reference: MLXArray) -> MLXArray {
+package func matchColor(_ source: MLXArray, reference: MLXArray) -> MLXArray {
     let (sm, ss) = channelStats(source)
     let (rm, rs) = channelStats(reference)
     let out = (source - sm) / MLX.maximum(ss, MLXArray(Float(1e-5))) * rs + rm
@@ -105,7 +105,7 @@ public func matchColor(_ source: MLXArray, reference: MLXArray) -> MLXArray {
 }
 
 /// Luminance grayscale (replicated to 3 channels).
-public func toGrayscale(_ rgb: MLXArray) -> MLXArray {
+package func toGrayscale(_ rgb: MLXArray) -> MLXArray {
     let r = rgb[0..., 0..., 0]
     let g = rgb[0..., 0..., 1]
     let b = rgb[0..., 0..., 2]
@@ -114,7 +114,7 @@ public func toGrayscale(_ rgb: MLXArray) -> MLXArray {
 }
 
 /// Classic sepia tone matrix.
-public func toSepia(_ rgb: MLXArray) -> MLXArray {
+package func toSepia(_ rgb: MLXArray) -> MLXArray {
     let r = rgb[0..., 0..., 0]
     let g = rgb[0..., 0..., 1]
     let b = rgb[0..., 0..., 2]
@@ -125,10 +125,10 @@ public func toSepia(_ rgb: MLXArray) -> MLXArray {
 }
 
 /// Invert.
-public func invertColor(_ rgb: MLXArray) -> MLXArray { 1 - rgb }
+package func invertColor(_ rgb: MLXArray) -> MLXArray { 1 - rgb }
 
 /// Per-channel box blur (reuses the 2-D `boxBlur`).
-public func blurRGB(_ rgb: MLXArray, passes: Int) -> MLXArray {
+package func blurRGB(_ rgb: MLXArray, passes: Int) -> MLXArray {
     let r = boxBlur(rgb[0..., 0..., 0], passes: passes)
     let g = boxBlur(rgb[0..., 0..., 1], passes: passes)
     let b = boxBlur(rgb[0..., 0..., 2], passes: passes)
@@ -136,13 +136,13 @@ public func blurRGB(_ rgb: MLXArray, passes: Int) -> MLXArray {
 }
 
 /// Unsharp-mask sharpen: `rgb + amount * (rgb - blur(rgb))`. `amount == 0` is identity.
-public func sharpen(_ rgb: MLXArray, amount: Float) -> MLXArray {
+package func sharpen(_ rgb: MLXArray, amount: Float) -> MLXArray {
     if amount == 0 { return rgb }
     return clip(rgb + amount * (rgb - blurRGB(rgb, passes: 1)), min: 0, max: 1)
 }
 
 /// Inverse of `rgbToHsv`. h,s,v are (H,W) in [0,1]; returns (H,W,3).
-public func hsvToRgb(_ h: MLXArray, _ s: MLXArray, _ v: MLXArray) -> MLXArray {
+package func hsvToRgb(_ h: MLXArray, _ s: MLXArray, _ v: MLXArray) -> MLXArray {
     let h6 = h * 6
     let i = MLX.floor(h6)
     let f = h6 - i

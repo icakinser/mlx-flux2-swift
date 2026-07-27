@@ -1,0 +1,13 @@
+{
+  "modelRevision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+  "generatedBy": "Scripts/refresh_goldens.sh",
+  "cases": [
+    {"id":"t2i-euler","file":"ref_bike_s42.png","seed":42,"size":[512,512],"steps":4,"guidance":1.0,"sampler":"euler","threshold":"strict"},
+    {"id":"t2i-heun","file":"ref_bike_heun_s42.png","seed":42,"size":[512,512],"steps":4,"guidance":1.0,"sampler":"heun","threshold":"strict"},
+    {"id":"img2img","file":"edit_img2img_s43.png","seed":43,"size":[512,512],"steps":4,"guidance":1.0,"sampler":"euler","strength":0.6,"threshold":"strict"},
+    {"id":"inpaint","file":"edit_inpaint_s44.png","seed":44,"size":[512,512],"steps":4,"guidance":1.0,"sampler":"euler","strength":0.85,"threshold":"strict"},
+    {"id":"outpaint","file":"edit_outpaint_s45.png","seed":45,"size":[576,576],"steps":4,"guidance":1.0,"sampler":"euler","strength":0.95,"threshold":"strict"},
+    {"id":"reference","file":"ref_condition_s46.png","seed":46,"size":[512,512],"steps":4,"guidance":1.0,"sampler":"euler","threshold":"strict"},
+    {"id":"multi-reference","file":"ref_multi_condition_s48.png","seed":48,"size":[512,512],"steps":4,"guidance":1.0,"sampler":"euler","threshold":"strict"}
+  ]
+}

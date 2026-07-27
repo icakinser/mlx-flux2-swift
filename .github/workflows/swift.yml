@@ -40,6 +40,8 @@ jobs:
       env:
         FLUX2_RUN_MLX_TESTS: "1"
       run: swift test -v
+    - name: Build external SwiftPM consumer
+      run: Scripts/smoke_consumer.sh --local
     - name: Require golden review for weight-loader changes
       if: github.event_name == 'pull_request'
       run: |

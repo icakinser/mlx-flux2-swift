@@ -8,7 +8,7 @@ import MLXNN
 import MLXRandom
 
 // RMS normalization with a learnable scale parameter.
-public final class Flux2RMSNorm: Module {
+package final class Flux2RMSNorm: Module {
 
     @ParameterInfo(key: "scale") public var scale: MLXArray
     public let eps: Float
@@ -25,7 +25,7 @@ public final class Flux2RMSNorm: Module {
 }
 
 // LayerNorm without learnable parameters
-public final class FastLayerNorm: Module {
+package final class FastLayerNorm: Module {
 
     public let eps: Float
 
@@ -40,7 +40,7 @@ public final class FastLayerNorm: Module {
 }
 
 // Applies RMSNorm to query and key projections.
-public final class QKNorm: Module {
+package final class QKNorm: Module {
 
     @ModuleInfo(key: "query_norm") public var queryNorm: Flux2RMSNorm
     @ModuleInfo(key: "key_norm") public var keyNorm: Flux2RMSNorm
@@ -59,7 +59,7 @@ public final class QKNorm: Module {
 }
 
 // Gated SiLU over a channel split
-public final class SiLUActivation: Module, UnaryLayer {
+package final class SiLUActivation: Module, UnaryLayer {
 
     override public init() {
         super.init()
@@ -90,7 +90,7 @@ private func timestepFreqs(_ dim: Int, _ maxPeriod: Int) -> MLXArray {
     return freqs
 }
 
-public func timestepEmbedding(
+package func timestepEmbedding(
     _ t: MLXArray, _ dim: Int, maxPeriod: Int = 10000, timeFactor: Float = 1000.0
 ) -> MLXArray {
     let t1 = t * timeFactor
@@ -104,14 +104,14 @@ public func timestepEmbedding(
 }
 
 // Computes RoPE frequencies for a given dimension and theta.
-public func computeRopeFrequencies(_ dim: Int, _ theta: Float) -> MLXArray {
+package func computeRopeFrequencies(_ dim: Int, _ theta: Float) -> MLXArray {
     precondition(dim % 2 == 0, "RoPE dim must be even")  // RoPE dim must be even
     let scale = MLXArray(stride(from: Int32(0), to: Int32(dim), by: 2)).asType(.float32) / Float(dim)
     return 1.0 / pow(MLXArray(theta), scale)
 }
 
 // float32 compute, optional cast to model dtype
-public func rope(
+package func rope(
     _ pos: MLXArray, _ dim: Int, _ theta: Float, _ omega: MLXArray? = nil, dtype: DType? = nil
 ) -> MLXArray {
     let omega = omega ?? computeRopeFrequencies(dim, theta)
@@ -128,7 +128,7 @@ public func rope(
 }
 
 // Applies rotary position embeddings to query and key tensors.
-public func applyRope(_ xq: MLXArray, _ xk: MLXArray, _ freqsCis: MLXArray) -> (MLXArray, MLXArray) {
+package func applyRope(_ xq: MLXArray, _ xk: MLXArray, _ freqsCis: MLXArray) -> (MLXArray, MLXArray) {
     let (b, h, l, d) = (xq.dim(0), xq.dim(1), xq.dim(2), xq.dim(3))
     let xq_ = xq.reshaped(b, h, l, d / 2, 1, 2)
     let xk_ = xk.reshaped(b, h, l, d / 2, 1, 2)
@@ -138,7 +138,7 @@ public func applyRope(_ xq: MLXArray, _ xk: MLXArray, _ freqsCis: MLXArray) -> (
 }
 
 // Scaled dot-product attention with RoPE applied to queries and keys.
-public func attention(
+package func attention(
     _ q: MLXArray, _ k: MLXArray, _ v: MLXArray, _ pe: MLXArray, _ scale: Float,
     safeAttn: Bool = false
 ) -> MLXArray {
@@ -163,7 +163,7 @@ public func attention(
 }
 
 // 4-axis RoPE embedder
-public final class EmbedND: Module {
+package final class EmbedND: Module {
 
     public let dim: Int
     public let theta: Float
@@ -193,7 +193,7 @@ public final class EmbedND: Module {
 }
 
 // Two-layer MLP embedder with SiLU activation.
-public final class MLPEmbedder: Module {
+package final class MLPEmbedder: Module {
 
     @ModuleInfo(key: "in_layer") public var inLayer: Linear
     @ModuleInfo(key: "out_layer") public var outLayer: Linear
@@ -209,10 +209,10 @@ public final class MLPEmbedder: Module {
     }
 }
 
-public typealias ModulationTriple = (MLXArray, MLXArray, MLXArray)
+package typealias ModulationTriple = (MLXArray, MLXArray, MLXArray)
 
 // Produces modulation (shift, scale, gate) triples from a conditioning vector.
-public final class Modulation: Module {
+package final class Modulation: Module {
 
     public let isDouble: Bool
     public let multiplier: Int
@@ -241,7 +241,7 @@ public final class Modulation: Module {
 }
 
 // Submodule container only, no forward
-public final class SelfAttention: Module {
+package final class SelfAttention: Module {
 
     public let numHeads: Int
 
@@ -260,7 +260,7 @@ public final class SelfAttention: Module {
 }
 
 // Single-stream transformer block combining attention and MLP.
-public final class SingleStreamBlock: Module {
+package final class SingleStreamBlock: Module {
 
     public let scale: Float
     public let hiddenSize: Int
@@ -310,7 +310,7 @@ public final class SingleStreamBlock: Module {
 }
 
 // Double-stream transformer block processing image and text streams jointly.
-public final class DoubleStreamBlock: Module {
+package final class DoubleStreamBlock: Module {
 
     public let hiddenSize: Int
     public let numHeads: Int
@@ -409,7 +409,7 @@ public final class DoubleStreamBlock: Module {
 }
 
 // Final normalization and projection layer with adaptive modulation.
-public final class LastLayer: Module {
+package final class LastLayer: Module {
 
     @ModuleInfo(key: "norm_final") public var normFinal: FastLayerNorm
     @ModuleInfo(key: "linear") public var linear: Linear
@@ -441,7 +441,7 @@ public final class LastLayer: Module {
 }
 
 // The Flux2 transformer (renamed per port convention).
-public final class Flux2Transformer: Module {
+package final class Flux2Transformer: Module {
 
     public let inChannels: Int
     public let outChannels: Int

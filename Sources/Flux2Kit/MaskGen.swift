@@ -78,7 +78,7 @@ private func morphMask(_ img: CGImage, iterations: Int, dilate: Bool) throws -> 
 }
 
 /// Convert a `(H, W)` mask grid in `[0, 1]` back into a grayscale CGImage.
-public func maskGridToCGImage(_ grid: MLXArray) throws -> CGImage {
+package func maskGridToCGImage(_ grid: MLXArray) throws -> CGImage {
     let scaled = (clip(grid, min: 0, max: 1) * 255).asType(.uint8)
     eval(scaled)
     let h = scaled.dim(0)

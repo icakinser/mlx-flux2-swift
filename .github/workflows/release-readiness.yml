@@ -1,0 +1,58 @@
+name: Release readiness
+
+on:
+  workflow_dispatch:
+  push:
+    tags: [ "v*" ]
+
+jobs:
+  build-test-consumer:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Cache SwiftPM
+      uses: actions/cache@v4
+      with:
+        path: .build
+        key: ${{ runner.os }}-release-spm-${{ hashFiles('Package.resolved') }}
+    - name: Validate manifest
+      run: swift package dump-package >/dev/null
+    - name: Build release products
+      run: swift build -c release
+    - name: Run unit and MLX tests
+      env:
+        FLUX2_RUN_MLX_TESTS: "1"
+      run: swift test
+    - name: Build external consumer
+      run: Scripts/smoke_consumer.sh "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+    - name: Build SwiftUI application example
+      run: swift build -c release --package-path Examples/Flux2KitSwiftUIExample
+    - name: Validate scripts
+      run: |
+        bash -n Scripts/*.sh
+        git diff --check
+
+  image-quality:
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Verify configured model
+      run: |
+        if [[ -z "${FLUX2_REPO:-}" || ! -d "$FLUX2_REPO" ]]; then
+          echo "Configure FLUX2_REPO on the release runner." >&2
+          exit 1
+        fi
+    - name: Stage MLX metallib
+      run: Scripts/setup_metallib.sh
+    - name: Run complete image quality matrix
+      env:
+        FLUX2_RUN_IMAGE_TESTS: "1"
+      run: swift test --filter ImageQualityTests
+    - name: Record release benchmark
+      run: BENCH_OUTPUT="$RUNNER_TEMP/release-benchmark.md" Scripts/bench.sh
+    - uses: actions/upload-artifact@v4
+      with:
+        name: release-benchmark
+        path: ${{ runner.temp }}/release-benchmark.md

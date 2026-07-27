@@ -10,7 +10,7 @@ import UniformTypeIdentifiers
 // High-quality CoreGraphics resampling (LANCZOS-equivalent downscaling) is NOT bit-identical to the
 // reference — this only affects the reference-image (kontext) path, never text-to-image. Flagged for
 // the parity harness.
-public func capPixels(_ img: CGImage, _ k: Int) throws -> CGImage {
+package func capPixels(_ img: CGImage, _ k: Int) throws -> CGImage {
     let w = img.width
     let h = img.height
     if w * h <= k {
@@ -23,7 +23,7 @@ public func capPixels(_ img: CGImage, _ k: Int) throws -> CGImage {
 }
 
 // Rejects images that are too small or have an extreme aspect ratio.
-public func capMinPixels(_ img: CGImage, maxAr: Double = 8.0, minSidelength: Int = 64) throws -> CGImage {
+package func capMinPixels(_ img: CGImage, maxAr: Double = 8.0, minSidelength: Int = 64) throws -> CGImage {
     let w = img.width
     let h = img.height
     if w < minSidelength || h < minSidelength {
@@ -36,7 +36,7 @@ public func capMinPixels(_ img: CGImage, maxAr: Double = 8.0, minSidelength: Int
 }
 
 // Center-crops the image down to the nearest multiple of `mult` on each side.
-public func centerCropToMultiple(_ img: CGImage, _ mult: Int) throws -> CGImage {
+package func centerCropToMultiple(_ img: CGImage, _ mult: Int) throws -> CGImage {
     let w = img.width
     let h = img.height
     let newW = (w / mult) * mult
@@ -50,7 +50,7 @@ public func centerCropToMultiple(_ img: CGImage, _ mult: Int) throws -> CGImage 
 }
 
 // RGB float32 in [-1, 1]
-public func cgImageToArray(_ img: CGImage) throws -> MLXArray {
+package func cgImageToArray(_ img: CGImage) throws -> MLXArray {
     let w = img.width
     let h = img.height
     let bytesPerRow = w * 4
@@ -81,7 +81,7 @@ public func cgImageToArray(_ img: CGImage) throws -> MLXArray {
 // Clip to [-1, 1], scale to uint8 RGB.
 // Upcasts to float32 first: the VAE may hand back bfloat16 (7-bit mantissa), which quantizes
 // smooth gradients into visible ±1–2 step banding. The final pixel math must run in float32.
-public func arrayToCGImage(_ arr: MLXArray) throws -> CGImage {
+package func arrayToCGImage(_ arr: MLXArray) throws -> CGImage {
     let f32 = arr.dtype == .float32 ? arr : arr.asType(.float32)
     let clipped = clip(f32, min: -1.0, max: 1.0)
     let scaled = ((clipped + 1.0) * 127.5).asType(.uint8)
@@ -109,7 +109,7 @@ public func arrayToCGImage(_ arr: MLXArray) throws -> CGImage {
 
 // Default image preprocessing pipeline: validate size/aspect ratio, cap max pixels, center-crop to
 // a multiple of `ensureMultiple`, then convert to a normalized MLXArray.
-public func defaultPrep(_ img: CGImage, limitPixels: Int?, ensureMultiple: Int = 16) throws -> MLXArray {
+package func defaultPrep(_ img: CGImage, limitPixels: Int?, ensureMultiple: Int = 16) throws -> MLXArray {
     // EXIF transpose happens at load time in loadImages (CGImageSource applies orientation);
     // a CGImage in memory carries no orientation tag once that transpose has been applied.
     var image = try capMinPixels(img)

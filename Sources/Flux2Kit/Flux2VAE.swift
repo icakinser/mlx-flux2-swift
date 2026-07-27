@@ -7,11 +7,11 @@ import MLXFast
 import MLXNN
 import MLXRandom
 
-public func swish(_ x: MLXArray) -> MLXArray {
+package func swish(_ x: MLXArray) -> MLXArray {
     silu(x)
 }
 
-public final class ResnetBlock: Module {
+package final class ResnetBlock: Module {
 
     public let useShortcut: Bool
 
@@ -66,7 +66,7 @@ public final class ResnetBlock: Module {
     }
 }
 
-public final class AttnBlock: Module {
+package final class AttnBlock: Module {
 
     public let inChannels: Int
     /// Cache attention scale (`in_channels ** -0.5`,
@@ -118,7 +118,7 @@ public final class AttnBlock: Module {
     }
 }
 
-public final class Downsample: Module {
+package final class Downsample: Module {
 
     @ModuleInfo(key: "conv") public var conv: Conv2d
 
@@ -137,7 +137,7 @@ public final class Downsample: Module {
     }
 }
 
-public final class Upsample: Module {
+package final class Upsample: Module {
 
     @ModuleInfo(key: "conv") public var conv: Conv2d
 
@@ -163,7 +163,7 @@ public final class Upsample: Module {
 
 /// Swift materialization of the anonymous `nn.Module()` used for `Encoder.down[i]`.
 /// Weight keys: `block.{j}.*`, `downsample.conv.*`.
-public final class EncoderDownBlock: Module {
+package final class EncoderDownBlock: Module {
 
     @ModuleInfo(key: "block") public var block: [ResnetBlock]
     @ModuleInfo(key: "downsample") public var downsample: Downsample?
@@ -177,7 +177,7 @@ public final class EncoderDownBlock: Module {
 
 /// Swift materialization of the anonymous `nn.Module()` used for `Decoder.up[i]`.
 /// Weight keys: `block.{j}.*`, `upsample.conv.*`.
-public final class DecoderUpBlock: Module {
+package final class DecoderUpBlock: Module {
 
     @ModuleInfo(key: "block") public var block: [ResnetBlock]
     @ModuleInfo(key: "upsample") public var upsample: Upsample?
@@ -191,7 +191,7 @@ public final class DecoderUpBlock: Module {
 
 /// Swift materialization of the anonymous `nn.Module()` used for `Encoder.mid` / `Decoder.mid`.
 /// Weight keys: `block_1.*`, `attn_1.*`, `block_2.*`.
-public final class VAEMidBlock: Module {
+package final class VAEMidBlock: Module {
 
     @ModuleInfo(key: "block_1") public var block1: ResnetBlock
     @ModuleInfo(key: "attn_1") public var attn1: AttnBlock
@@ -205,7 +205,7 @@ public final class VAEMidBlock: Module {
     }
 }
 
-public final class Encoder: Module {
+package final class Encoder: Module {
 
     // quant_conv lives on the Encoder
     // (weight key "encoder.quant_conv.*")
@@ -305,7 +305,7 @@ public final class Encoder: Module {
     }
 }
 
-public final class Decoder: Module {
+package final class Decoder: Module {
 
     // post_quant_conv lives on the Decoder
     // (weight key "decoder.post_quant_conv.*")
@@ -409,7 +409,7 @@ public final class Decoder: Module {
     }
 }
 
-public final class AutoEncoder: Module {
+package final class AutoEncoder: Module {
 
     public let params: VAEConfig
     /// `var` (not `let`) because the pipeline mutates `vae.force_upcast` for the fp16 path.

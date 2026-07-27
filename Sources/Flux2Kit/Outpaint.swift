@@ -15,10 +15,15 @@ extension Flux2Pipeline {
         strength: Double = 0.95,
         numSteps: Int = defaultSteps, guidance: Double = Double(defaultGuidance),
         seed: UInt64? = nil, maskFeather: Int = 2,
-        verbose: Bool = false, evalFreq: Int = 1
+        verbose: Bool = false, evalFreq: Int = 1,
+        sampler: Sampler = .euler,
+        guidanceSchedule: GuidanceSchedule = .constant,
+        progress: (@Sendable (GenerationProgress) -> Void)? = nil,
+        cancellation: GenerationCancellation? = nil
     ) throws -> CGImage {
         generationLock.lock()
         defer { generationLock.unlock() }
+        if cancellation?.isCancelled == true { throw Flux2Error.cancelled }
         let sw = source.width
         let sh = source.height
         let l = max(0, left), t = max(0, top)
@@ -71,6 +76,8 @@ extension Flux2Pipeline {
         return try generateInpaint(
             prompt: prompt, source: canvas, mask: mask, strength: strength,
             width: nw, height: nh, numSteps: numSteps, guidance: guidance, seed: seed,
-            maskFeather: maskFeather, verbose: verbose, evalFreq: evalFreq)
+            maskFeather: maskFeather, verbose: verbose, evalFreq: evalFreq,
+            sampler: sampler, guidanceSchedule: guidanceSchedule, progress: progress,
+            cancellation: cancellation)
     }
 }

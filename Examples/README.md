@@ -31,3 +31,17 @@ The example is a separate package, so building it also demonstrates consuming Fl
 dependency. See `Sources/Flux2KitExample/Example.swift`. To depend on this library from your own
 package, point `.package(path:)` at this repo (or use the GitHub URL). The stable API and threading
 contract are documented in [`../Docs/Library.md`](../Docs/Library.md).
+
+## SwiftUI application example
+
+`Flux2KitSwiftUIExample` demonstrates the application-facing API: pipeline configuration, repeated
+generation on a shared thread-safe pipeline, progress updates, cooperative cancellation, and
+reference-image import.
+
+```sh
+cd Examples/Flux2KitSwiftUIExample
+swift build
+../../Scripts/setup_metallib.sh
+../../Scripts/stage_metallib.sh .build/arm64-apple-macosx/debug
+FLUX2_REPO=/path/to/Models/FLUX-2 swift run
+```

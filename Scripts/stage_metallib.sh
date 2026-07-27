@@ -8,6 +8,15 @@
 
 set -euo pipefail
 
+CALLER="$PWD"
+DESTINATIONS=()
+for destination in "$@"; do
+    if [[ "$destination" != /* ]]; then
+        destination="$CALLER/$destination"
+    fi
+    DESTINATIONS+=("$destination")
+done
+
 cd "$(dirname "$0")/.."
 
 if [[ "$#" -eq 0 ]]; then
@@ -21,7 +30,7 @@ if [[ ! -f "$SOURCE" ]]; then
     exit 1
 fi
 
-for destination in "$@"; do
+for destination in "${DESTINATIONS[@]}"; do
     if [[ ! -d "$destination" ]]; then
         echo "build-product directory does not exist: $destination" >&2
         exit 1

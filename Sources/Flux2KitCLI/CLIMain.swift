@@ -270,7 +270,7 @@ struct Flux2KitCLI {
 
                   memory:
                     -q int8|int4          quantize the transformer + text encoder
-                    --compile             enable mx.compile for 30-50% per-step speedup after warmup
+                    --compile             opt into quality-gated mx.compile execution
                     --low-memory          preset: int4 + free each model after its stage + fp16 VAE
                     --mem-report          print per-stage RSS / MLX active / peak memory
                     --cache-limit MB      cap the MLX buffer cache
@@ -461,6 +461,8 @@ struct Flux2KitCLI {
                 fail("this mode requires --mask FILE, --mask-box x,y,w,h, or --mask-ellipse x,y,w,h")
             }
 
+            let guidanceSchedule: GuidanceSchedule =
+                guidanceEnd.map { .linear(end: $0) } ?? .constant
             func runOnce(_ curSeed: UInt64?) throws -> CGImage {
                 if diffusionActive {
                     guard let src = srcImg else { fail("this operation requires --source PATH") }
@@ -469,14 +471,16 @@ struct Flux2KitCLI {
                         return try pipeline.generateOutpaint(
                             source: src, prompt: prompt ?? "", left: l, right: r, top: t, bottom: b,
                             strength: strength ?? 0.95, numSteps: steps, guidance: guidance,
-                            seed: curSeed, verbose: verbose, evalFreq: evalFreq)
+                            seed: curSeed, verbose: verbose, evalFreq: evalFreq,
+                            sampler: sampler, guidanceSchedule: guidanceSchedule)
                     }
                     if doImg2Img {
                         guard let p = prompt else { fail("--img2img requires -p PROMPT") }
                         return try pipeline.generateImg2Img(
                             prompt: p, source: src, strength: strength ?? 0.6,
                             width: width, height: height, numSteps: steps, guidance: guidance,
-                            seed: curSeed, inputImages: refImages, verbose: verbose, evalFreq: evalFreq)
+                            seed: curSeed, inputImages: refImages, verbose: verbose, evalFreq: evalFreq,
+                            sampler: sampler, guidanceSchedule: guidanceSchedule)
                     }
                     if experimentalLatentColor {
                         guard let spec = recolorSpec else {
@@ -494,28 +498,32 @@ struct Flux2KitCLI {
                         return try pipeline.removeObject(
                             source: src, mask: requireMask(), strength: strength ?? 0.9,
                             width: width, height: height, numSteps: steps, guidance: guidance,
-                            seed: curSeed, maskFeather: feather, verbose: verbose, evalFreq: evalFreq)
+                            seed: curSeed, maskFeather: feather, verbose: verbose, evalFreq: evalFreq,
+                            sampler: sampler, guidanceSchedule: guidanceSchedule)
                     }
                     if let addObjectPrompt {
                         return try pipeline.addObject(
                             source: src, mask: requireMask(), prompt: addObjectPrompt,
                             referenceImage: refImages?.first, strength: strength ?? 0.85,
                             width: width, height: height, numSteps: steps, guidance: guidance,
-                            seed: curSeed, maskFeather: feather, verbose: verbose, evalFreq: evalFreq)
+                            seed: curSeed, maskFeather: feather, verbose: verbose, evalFreq: evalFreq,
+                            sampler: sampler, guidanceSchedule: guidanceSchedule)
                     }
                     if let replaceBgPrompt {
                         return try pipeline.replaceBackground(
                             source: src, subjectMask: requireMask(), prompt: replaceBgPrompt,
                             strength: strength ?? 0.9, width: width, height: height, numSteps: steps,
                             guidance: guidance, seed: curSeed, maskFeather: feather,
-                            verbose: verbose, evalFreq: evalFreq)
+                            verbose: verbose, evalFreq: evalFreq, sampler: sampler,
+                            guidanceSchedule: guidanceSchedule)
                     }
                     if let editPrompt {
                         return try pipeline.editRegion(
                             source: src, mask: requireMask(), prompt: editPrompt,
                             strength: strength ?? 0.85, width: width, height: height, numSteps: steps,
                             guidance: guidance, seed: curSeed, invertMask: invertMask,
-                            maskFeather: feather, verbose: verbose, evalFreq: evalFreq)
+                            maskFeather: feather, verbose: verbose, evalFreq: evalFreq,
+                            sampler: sampler, guidanceSchedule: guidanceSchedule)
                     }
                     fail("no editing operation matched")
                 }
@@ -525,8 +533,7 @@ struct Flux2KitCLI {
                 return try pipeline.generate(
                     prompt: p, width: width, height: height, numSteps: steps, guidance: guidance,
                     seed: curSeed, inputImages: refImages, verbose: verbose, evalFreq: evalFreq,
-                    sampler: sampler,
-                    guidanceSchedule: guidanceEnd.map { .linear(end: $0) } ?? .constant)
+                    sampler: sampler, guidanceSchedule: guidanceSchedule)
             }
 
             // experimental-latent is deterministic → a single output.

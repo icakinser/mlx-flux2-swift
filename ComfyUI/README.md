@@ -17,7 +17,7 @@ subprocess and exchange images as PNG files. This is a thin (~200-line) adapter.
 
 | Requirement | How |
 |-------------|-----|
-| Apple Silicon Mac, macOS 26+, Xcode 26 | — |
+| Apple Silicon Mac, macOS 14+, Xcode 26 | — |
 | The `flux2kit-cli` binary | `swift build -c release` in the repo root (see step 2) |
 | MLX metallib next to the binary | build via the Xcode toolchain, or copy `default.metallib`/`mlx.metallib` next to the executable (see the repo README's *MLX Metal library note*) |
 | FLUX.2 [klein] weights | `flux2kit-cli --download`, or `huggingface-cli download black-forest-labs/FLUX.2-klein-4B` |

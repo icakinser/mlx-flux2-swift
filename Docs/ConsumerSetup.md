@@ -44,7 +44,7 @@ Point your application at a local FLUX.2 [klein] diffusers snapshot and initiali
 ## Compatibility
 
 - Apple Silicon macOS
-- macOS 26+
+- macOS 14+
 - Xcode 26 / Swift 6.2
 - Pinned `mlx-swift` and `swift-transformers` revisions in `Package.swift`
 

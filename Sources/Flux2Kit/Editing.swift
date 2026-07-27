@@ -18,12 +18,17 @@ extension Flux2Pipeline {
         strength: Double = 0.85, width: Int, height: Int,
         numSteps: Int = defaultSteps, guidance: Double = Double(defaultGuidance),
         seed: UInt64? = nil, invertMask: Bool = false, maskFeather: Int = 1,
-        verbose: Bool = false, evalFreq: Int = 1
+        verbose: Bool = false, evalFreq: Int = 1, sampler: Sampler = .euler,
+        guidanceSchedule: GuidanceSchedule = .constant,
+        progress: (@Sendable (GenerationProgress) -> Void)? = nil,
+        cancellation: GenerationCancellation? = nil
     ) throws -> CGImage {
         try generateInpaint(
             prompt: prompt, source: source, mask: mask, strength: strength,
             width: width, height: height, numSteps: numSteps, guidance: guidance, seed: seed,
-            invertMask: invertMask, maskFeather: maskFeather, verbose: verbose, evalFreq: evalFreq)
+            invertMask: invertMask, maskFeather: maskFeather, verbose: verbose, evalFreq: evalFreq,
+            sampler: sampler, guidanceSchedule: guidanceSchedule, progress: progress,
+            cancellation: cancellation)
     }
 
     /// Remove whatever is under the white region of `mask` and fill with continued background.
@@ -32,12 +37,17 @@ extension Flux2Pipeline {
         strength: Double = 0.9, width: Int, height: Int,
         numSteps: Int = defaultSteps, guidance: Double = Double(defaultGuidance),
         seed: UInt64? = nil, maskFeather: Int = 2,
-        verbose: Bool = false, evalFreq: Int = 1
+        verbose: Bool = false, evalFreq: Int = 1, sampler: Sampler = .euler,
+        guidanceSchedule: GuidanceSchedule = .constant,
+        progress: (@Sendable (GenerationProgress) -> Void)? = nil,
+        cancellation: GenerationCancellation? = nil
     ) throws -> CGImage {
         try generateInpaint(
             prompt: Self.removalPrompt, source: source, mask: mask, strength: strength,
             width: width, height: height, numSteps: numSteps, guidance: guidance, seed: seed,
-            invertMask: false, maskFeather: maskFeather, verbose: verbose, evalFreq: evalFreq)
+            invertMask: false, maskFeather: maskFeather, verbose: verbose, evalFreq: evalFreq,
+            sampler: sampler, guidanceSchedule: guidanceSchedule, progress: progress,
+            cancellation: cancellation)
     }
 
     /// Replace the background (everything OUTSIDE the white subject region) with `prompt`.
@@ -47,12 +57,17 @@ extension Flux2Pipeline {
         strength: Double = 0.9, width: Int, height: Int,
         numSteps: Int = defaultSteps, guidance: Double = Double(defaultGuidance),
         seed: UInt64? = nil, maskFeather: Int = 2,
-        verbose: Bool = false, evalFreq: Int = 1
+        verbose: Bool = false, evalFreq: Int = 1, sampler: Sampler = .euler,
+        guidanceSchedule: GuidanceSchedule = .constant,
+        progress: (@Sendable (GenerationProgress) -> Void)? = nil,
+        cancellation: GenerationCancellation? = nil
     ) throws -> CGImage {
         try generateInpaint(
             prompt: prompt, source: source, mask: subjectMask, strength: strength,
             width: width, height: height, numSteps: numSteps, guidance: guidance, seed: seed,
-            invertMask: true, maskFeather: maskFeather, verbose: verbose, evalFreq: evalFreq)
+            invertMask: true, maskFeather: maskFeather, verbose: verbose, evalFreq: evalFreq,
+            sampler: sampler, guidanceSchedule: guidanceSchedule, progress: progress,
+            cancellation: cancellation)
     }
 
     /// Add an object described by `prompt` into the white region of `mask`. The model synthesizes it
@@ -63,14 +78,18 @@ extension Flux2Pipeline {
         strength: Double = 0.85, width: Int, height: Int,
         numSteps: Int = defaultSteps, guidance: Double = Double(defaultGuidance),
         seed: UInt64? = nil, maskFeather: Int = 1,
-        verbose: Bool = false, evalFreq: Int = 1
+        verbose: Bool = false, evalFreq: Int = 1, sampler: Sampler = .euler,
+        guidanceSchedule: GuidanceSchedule = .constant,
+        progress: (@Sendable (GenerationProgress) -> Void)? = nil,
+        cancellation: GenerationCancellation? = nil
     ) throws -> CGImage {
         let refs = referenceImage.map { [$0] }
         return try generateInpaint(
             prompt: prompt, source: source, mask: mask, strength: strength,
             width: width, height: height, numSteps: numSteps, guidance: guidance, seed: seed,
             inputImages: refs, invertMask: false, maskFeather: maskFeather,
-            verbose: verbose, evalFreq: evalFreq)
+            verbose: verbose, evalFreq: evalFreq, sampler: sampler,
+            guidanceSchedule: guidanceSchedule, progress: progress, cancellation: cancellation)
     }
 
     /// Recolor. With a `prompt`, does a mask-guided diffusion recolor (respects lighting/material).
@@ -84,7 +103,10 @@ extension Flux2Pipeline {
         strength: Double = 0.7, width: Int = 0, height: Int = 0,
         numSteps: Int = defaultSteps, guidance: Double = Double(defaultGuidance),
         seed: UInt64? = nil, invertMask: Bool = false, maskFeather: Int = 2,
-        verbose: Bool = false, evalFreq: Int = 1
+        verbose: Bool = false, evalFreq: Int = 1, sampler: Sampler = .euler,
+        guidanceSchedule: GuidanceSchedule = .constant,
+        progress: (@Sendable (GenerationProgress) -> Void)? = nil,
+        cancellation: GenerationCancellation? = nil
     ) throws -> CGImage {
         // Semantic recolor via diffusion.
         if let prompt {
@@ -95,7 +117,8 @@ extension Flux2Pipeline {
                 prompt: prompt, source: source, mask: mask, strength: strength,
                 width: width, height: height, numSteps: numSteps, guidance: guidance, seed: seed,
                 invertMask: invertMask, maskFeather: maskFeather, verbose: verbose,
-                evalFreq: evalFreq)
+                evalFreq: evalFreq, sampler: sampler, guidanceSchedule: guidanceSchedule,
+                progress: progress, cancellation: cancellation)
         }
 
         // Exact pixel-space grade at native resolution.

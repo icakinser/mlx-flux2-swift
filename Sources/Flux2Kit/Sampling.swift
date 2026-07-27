@@ -314,11 +314,12 @@ package func denoise(
     guidanceEmbedded: MLXArray? = nil,
     guidanceSchedule: GuidanceSchedule = .constant,
     evalFreq: Int = 1,
+    shouldCancel: (() -> Bool)? = nil,
     // Optional per-step transform applied to the latent AFTER the step update, before eval.
     // Defaults to nil (no-op) so the deterministic default path is unchanged. Used by inpainting to
     // re-blend the KEEP region each step. Receives (step, tPrev, img) and returns the new img.
     postStep: ((Int, Double, MLXArray) -> MLXArray)? = nil
-) -> MLXArray {
+) throws -> MLXArray {
     var img = img
     // model_fn defaults to the model itself
     let modelFn = modelFn ?? { x, xIds, t, ctx, ctxIds, g, pX, pCtx, txtEmb, gEmb in
@@ -337,6 +338,9 @@ package func denoise(
     let numSteps = timesteps.count - 1
     // enumerate(zip(timesteps[:-1], timesteps[1:]))
     for (step, (tCurr, tPrev)) in zip(timesteps.dropLast(), timesteps.dropFirst()).enumerated() {
+        if shouldCancel?() == true { throw Flux2Error.cancelled }
+        let signpost = Flux2Signpost.beginStep(step)
+        defer { Flux2Signpost.end("DenoiseStep", signpost) }
         let stepStart = ProcessInfo.processInfo.systemUptime  // monotonic clock
         let tVec = MLX.full([img.dim(0)], values: tCurr.asMLXArray(dtype: img.dtype), dtype: img.dtype)
         let stepGuidance = guidanceSchedule.value(step: step, totalSteps: numSteps, start: guidance)
@@ -412,8 +416,9 @@ package func denoiseHeun(
     guidanceEmbedded: MLXArray? = nil,
     guidanceSchedule: GuidanceSchedule = .constant,
     evalFreq: Int = 1,
+    shouldCancel: (() -> Bool)? = nil,
     postStep: ((Int, Double, MLXArray) -> MLXArray)? = nil
-) -> MLXArray {
+) throws -> MLXArray {
     var img = img
     let modelFn = modelFn ?? { x, xIds, t, ctx, ctxIds, g, pX, pCtx, txtEmb, gEmb in
         model(x, xIds, t, ctx, ctxIds, g, pX, pCtx, txtEmb, gEmb)
@@ -429,6 +434,9 @@ package func denoiseHeun(
     let txtEmbedded = txtEmbedded ?? model.embedTxt(txt)
     let numSteps = timesteps.count - 1
     for (step, (tCurr, tPrev)) in zip(timesteps.dropLast(), timesteps.dropFirst()).enumerated() {
+        if shouldCancel?() == true { throw Flux2Error.cancelled }
+        let signpost = Flux2Signpost.beginStep(step)
+        defer { Flux2Signpost.end("DenoiseStep", signpost) }
         let stepStart = ProcessInfo.processInfo.systemUptime
         let tVec = MLX.full([img.dim(0)], values: tCurr.asMLXArray(dtype: img.dtype), dtype: img.dtype)
         let stepGuidance = guidanceSchedule.value(step: step, totalSteps: numSteps, start: guidance)
@@ -515,11 +523,12 @@ package func denoiseCfg(
     txtEmbedded: MLXArray? = nil,
     guidanceSchedule: GuidanceSchedule = .constant,
     evalFreq: Int = 1,
+    shouldCancel: (() -> Bool)? = nil,
     // See denoise(): optional per-step latent transform, applied to the doubled (uncond,cond)
     // batch after the step update. Defaults to nil (no-op). A (1,N,1) mask broadcasts over both
     // halves of the CFG batch, so the same blend applies to uncond and cond.
     postStep: ((Int, Double, MLXArray) -> MLXArray)? = nil
-) -> MLXArray {
+) throws -> MLXArray {
     // model_fn defaults to the model itself
     let resolvedModelFn = modelFn ?? { x, xIds, t, ctx, ctxIds, g, pX, pCtx, txtEmb, gEmb in
         model(x, xIds, t, ctx, ctxIds, g, pX, pCtx, txtEmb, gEmb)
@@ -565,6 +574,9 @@ package func denoiseCfg(
 
     let numSteps = timesteps.count - 1
     for (step, (tCurr, tPrev)) in zip(timesteps.dropLast(), timesteps.dropFirst()).enumerated() {
+        if shouldCancel?() == true { throw Flux2Error.cancelled }
+        let signpost = Flux2Signpost.beginStep(step)
+        defer { Flux2Signpost.end("DenoiseStep", signpost) }
         let stepStart = ProcessInfo.processInfo.systemUptime  // monotonic clock
         let tVec = MLX.full([img.dim(0)], values: tCurr.asMLXArray(dtype: img.dtype), dtype: img.dtype)
         let stepGuidance = guidanceSchedule.value(step: step, totalSteps: numSteps, start: guidance)

@@ -72,6 +72,7 @@ public struct GenerationOptions: Sendable {
     public var sampler: Sampler
     public var guidanceSchedule: GuidanceSchedule
     public var progress: (@Sendable (GenerationProgress) -> Void)?
+    public var cancellation: GenerationCancellation?
 
     public init(
         prompt: String,
@@ -85,7 +86,8 @@ public struct GenerationOptions: Sendable {
         evalFreq: Int = 1,
         sampler: Sampler = .euler,
         guidanceSchedule: GuidanceSchedule = .constant,
-        progress: (@Sendable (GenerationProgress) -> Void)? = nil
+        progress: (@Sendable (GenerationProgress) -> Void)? = nil,
+        cancellation: GenerationCancellation? = nil
     ) {
         self.prompt = prompt
         self.width = width
@@ -99,10 +101,11 @@ public struct GenerationOptions: Sendable {
         self.sampler = sampler
         self.guidanceSchedule = guidanceSchedule
         self.progress = progress
+        self.cancellation = cancellation
     }
 }
 
-public final class Flux2Pipeline {
+public final class Flux2Pipeline: @unchecked Sendable {
 
     /// Serializes generation so concurrent callers cannot corrupt the global RNG or the residency
     /// state. Recursive because `generateImg2Img` (strength ≥ 1) delegates to `generate`.
@@ -125,6 +128,8 @@ public final class Flux2Pipeline {
     package private(set) var model: Flux2Transformer?
     package private(set) var vae: AutoEncoder?
     package private(set) var textEncoder: Qwen3Embedder?
+    package var cachedModelFunctions: Flux2ModelFunctions?
+    package var cachedModelIdentity: ObjectIdentifier?
 
     public var residency: ResidencyPolicy
     public let memReport: Bool
@@ -139,8 +144,8 @@ public final class Flux2Pipeline {
 
     private var cachedEmptyCtx: MLXArray?
 
-    /// `compile` enables the mx.compile fast path for the denoising forward closures,
-    /// yielding 30-50% per-step speedup after warmup. Numerics are identical either way.
+    /// `compile` enables quality-gated `mx.compile` forward closures. It remains opt-in because
+    /// release-build benefit and low-precision numerical ordering vary by MLX version and workload.
     public init(
         repoId: String = defaultRepoId,
         repoPath: URL? = nil,
@@ -306,17 +311,17 @@ public final class Flux2Pipeline {
     // MARK: - Ensure / unload (staged residency)
 
     // 2026-07-26 EDT | PERMANENT — thread-safe public lifecycle methods
-    public func ensureTextEncoder() throws {
+    package func ensureTextEncoder() throws {
         generationLock.lock()
         defer { generationLock.unlock() }
         if textEncoder == nil { textEncoder = try makeTextEncoder() }
     }
-    public func ensureTransformer() throws {
+    package func ensureTransformer() throws {
         generationLock.lock()
         defer { generationLock.unlock() }
         if model == nil { model = try makeTransformer() }
     }
-    public func ensureVAE() throws {
+    package func ensureVAE() throws {
         generationLock.lock()
         defer { generationLock.unlock() }
         if vae == nil { vae = try makeVAE() }
@@ -345,7 +350,7 @@ public final class Flux2Pipeline {
     }
 
     /// Free a stage's model — no-op under `.keepResident`.
-    public func unloadTextEncoder() {
+    package func unloadTextEncoder() {
         generationLock.lock()
         defer { generationLock.unlock() }
         if residency == .unloadAfterUse {
@@ -357,12 +362,17 @@ public final class Flux2Pipeline {
             MLX.Memory.clearCache()
         }
     }
-    public func unloadTransformer() {
+    package func unloadTransformer() {
         generationLock.lock()
         defer { generationLock.unlock() }
-        if residency == .unloadAfterUse { model = nil; MLX.Memory.clearCache() }
+        if residency == .unloadAfterUse {
+            model = nil
+            cachedModelFunctions = nil
+            cachedModelIdentity = nil
+            MLX.Memory.clearCache()
+        }
     }
-    public func unloadVAE() {
+    package func unloadVAE() {
         generationLock.lock()
         defer { generationLock.unlock() }
         if residency == .unloadAfterUse { vae = nil; MLX.Memory.clearCache() }
@@ -451,7 +461,8 @@ public final class Flux2Pipeline {
             evalFreq: options.evalFreq,
             sampler: options.sampler,
             guidanceSchedule: options.guidanceSchedule,
-            progress: options.progress)
+            progress: options.progress,
+            cancellation: options.cancellation)
     }
 
     public func generate(
@@ -467,10 +478,14 @@ public final class Flux2Pipeline {
         evalFreq: Int = 1,
         sampler: Sampler = .euler,
         guidanceSchedule: GuidanceSchedule = .constant,
-        progress: (@Sendable (GenerationProgress) -> Void)? = nil
+        progress: (@Sendable (GenerationProgress) -> Void)? = nil,
+        cancellation: GenerationCancellation? = nil
     ) throws -> CGImage {
         generationLock.lock()
         defer { generationLock.unlock() }
+        let generationSignpost = Flux2Signpost.begin("Generation")
+        defer { Flux2Signpost.end("Generation", generationSignpost) }
+        if cancellation?.isCancelled == true { throw Flux2Error.cancelled }
         let guidanceDistilled = guidanceDistilled ?? isDistilled
 
         // `% 16 == 0` alone accepts 0 and negatives (e.g. -16 % 16 == 0), which yield empty latents
@@ -493,8 +508,9 @@ public final class Flux2Pipeline {
         try ensureTextEncoder()
         reportMemory("pre-encode")
         var t0 = ProcessInfo.processInfo.systemUptime
-        let (ctx, ctxIds, teBreakdown) = try encodePrompt(
-            prompt, guidanceDistilled: guidanceDistilled, verbose: verbose)
+        let (ctx, ctxIds, teBreakdown) = try Flux2Signpost.measure("TextEncode") {
+            try encodePrompt(prompt, guidanceDistilled: guidanceDistilled, verbose: verbose)
+        }
         if verbose { eval(ctx, ctxIds) }
         timings["text_encode"] = ProcessInfo.processInfo.systemUptime - t0
 
@@ -515,7 +531,9 @@ public final class Flux2Pipeline {
             try ensureVAE()
             let vae = try requireVAE()
             t0 = ProcessInfo.processInfo.systemUptime
-            (imgCondSeq, imgCondSeqIds) = try encodeImageRefs(vae, inputImages)
+            (imgCondSeq, imgCondSeqIds) = try Flux2Signpost.measure("ReferenceEncode") {
+                try encodeImageRefs(vae, inputImages)
+            }
             if verbose, let s = imgCondSeq, let i = imgCondSeqIds {
                 eval(s, i)
                 timings["ref_encode"] = ProcessInfo.processInfo.systemUptime - t0
@@ -551,8 +569,9 @@ public final class Flux2Pipeline {
         if !guidanceDistilled {
             imgInputIds = concatenated([imgInputIds, imgInputIds], axis: 0)
         }
-        let peX = model.peEmbedder(imgInputIds)
-        let peCtx = model.peEmbedder(ctxIds)
+        let (peX, peCtx) = Flux2Signpost.measure("PositionEmbeddings") {
+            (model.peEmbedder(imgInputIds), model.peEmbedder(ctxIds))
+        }
         if verbose { eval(peX, peCtx) }
         timings["pe_embed"] = ProcessInfo.processInfo.systemUptime - t0
 
@@ -560,98 +579,29 @@ public final class Flux2Pipeline {
             print(String(format: "[%7.1fms] Position embeddings", (timings["pe_embed"] ?? 0) * 1000))
         }
 
-        let observesSteps = verbose || progress != nil
-        let stepTimes = Flux2StepTimes()
-
-        let logStep: (Int, Double, Double, MLXArray, MLXArray) -> Void = { step, tCurr, tPrev, _, _ in
-            let stepTime = stepTimes.values.last ?? 0
-            if verbose {
-                print(String(format: "[%7.1fms] Step %d/%d  t=%.4f→%.4f",
-                             stepTime * 1000, step + 1, numSteps, tCurr, tPrev))
-            }
-            progress?(
-                GenerationProgress(
-                    step: step,
-                    totalSteps: numSteps,
-                    currentTimestep: tCurr,
-                    nextTimestep: tPrev,
-                    elapsedMilliseconds: stepTime * 1000))
-        }
-
-        // 2026-07-26 EDT | PERMANENT — enables mx.compile fast path for forward closures
-        let modelFn: Flux2ModelFn
-        let modelFnCfg: Flux2ModelCfgFn
-        if useCompile {
-            let compiledFn = compile { (args: [MLXArray]) -> [MLXArray] in
-                [model(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9])]
-            }
-            modelFn = { x, xIds, t, ctx, ctxIds, g, peX, peCtx, txtEmb, gEmb in
-                compiledFn([x, xIds, t, ctx, ctxIds,
-                            g ?? MLXArray(0), peX ?? MLXArray(0), peCtx ?? MLXArray(0),
-                            txtEmb ?? MLXArray(0), gEmb ?? MLXArray(0)])[0]
-            }
-            let compiledCfgFn = compile { (args: [MLXArray]) -> [MLXArray] in
-                [model(args[0], args[1], args[2], args[3], args[4], nil, args[5], args[6], args[7], nil)]
-            }
-            modelFnCfg = { x, xIds, t, ctx, ctxIds, peX, peCtx, txtEmb in
-                compiledCfgFn([x, xIds, t, ctx, ctxIds, peX, peCtx, txtEmb])[0]
-            }
-        } else {
-            modelFn = { [model] x, xIds, t, ctx, ctxIds, g, peX, peCtx, txtEmb, gEmb in
-                model(x, xIds, t, ctx, ctxIds, g, peX, peCtx, txtEmb, gEmb)
-            }
-            modelFnCfg = { [model] x, xIds, t, ctx, ctxIds, peX, peCtx, txtEmb in
-                model(x, xIds, t, ctx, ctxIds, nil, peX, peCtx, txtEmb, nil)
-            }
-        }
-
         t0 = ProcessInfo.processInfo.systemUptime
-        if guidanceDistilled {
-            if sampler == .heun {
-                x = denoiseHeun(
-                    model, x, xIds, ctx, ctxIds,
-                    timesteps: timesteps,
-                    guidance: guidance,
-                    imgCondSeq: imgCondSeq,
-                    imgCondSeqIds: imgCondSeqIds,
-                    logFn: observesSteps ? logStep : nil,
-                    peX: peX,
-                    peCtx: peCtx,
-                    modelFn: modelFn,
-                    stepTimes: observesSteps ? stepTimes : nil,
-                    guidanceSchedule: guidanceSchedule,
-                    evalFreq: evalFreq)
-            } else {
-                x = denoise(
-                    model, x, xIds, ctx, ctxIds,
-                    timesteps: timesteps,
-                    guidance: guidance,
-                    imgCondSeq: imgCondSeq,
-                    imgCondSeqIds: imgCondSeqIds,
-                    logFn: observesSteps ? logStep : nil,
-                    peX: peX,
-                    peCtx: peCtx,
-                    modelFn: modelFn,
-                    stepTimes: observesSteps ? stepTimes : nil,
-                    guidanceSchedule: guidanceSchedule,
-                    evalFreq: evalFreq)
-            }
-        } else {
-            x = denoiseCfg(
-                model, x, xIds, ctx, ctxIds,
+        x = try executeDenoise(
+            model: model,
+            request: DenoiseRequest(
+                image: x,
+                imageIds: xIds,
+                text: ctx,
+                textIds: ctxIds,
                 timesteps: timesteps,
                 guidance: guidance,
-                imgCondSeq: imgCondSeq,
-                imgCondSeqIds: imgCondSeqIds,
-                logFn: observesSteps ? logStep : nil,
-                peX: peX,
-                peCtx: peCtx,
-                modelFn: modelFn,
-                modelFnCfg: modelFnCfg,
-                stepTimes: observesSteps ? stepTimes : nil,
+                guidanceDistilled: guidanceDistilled,
+                imageCondition: imgCondSeq,
+                imageConditionIds: imgCondSeqIds,
+                positionImage: peX,
+                positionText: peCtx),
+            options: DenoiseExecutionOptions(
+                sampler: sampler,
                 guidanceSchedule: guidanceSchedule,
-                evalFreq: evalFreq)
-        }
+                evalFrequency: evalFreq,
+                verbose: verbose,
+                progress: progress,
+                cancellation: cancellation))
+        if cancellation?.isCancelled == true { throw Flux2Error.cancelled }
         timings["denoise"] = ProcessInfo.processInfo.systemUptime - t0
 
         if verbose {
@@ -661,17 +611,20 @@ public final class Flux2Pipeline {
         }
 
         t0 = ProcessInfo.processInfo.systemUptime
-        x = concatenated(scatterIds(x, xIds), axis: 0)
-        if x.dim(2) == 1 {
-            x = x.squeezed(axis: 2)
-        } else {
-            if verbose {
-                print("         Warning: time dimension \(x.dim(2)) > 1, using t=0 slice")
+        x = Flux2Signpost.measure("Scatter") {
+            var scattered = concatenated(scatterIds(x, xIds), axis: 0)
+            if scattered.dim(2) == 1 {
+                scattered = scattered.squeezed(axis: 2)
+            } else {
+                if verbose {
+                    print("         Warning: time dimension \(scattered.dim(2)) > 1, using t=0 slice")
+                }
+                scattered = scattered[0..., 0..., 0, 0..., 0...]
             }
-            x = x[0..., 0..., 0, 0..., 0...]
+            scattered = scattered.transposed(0, 2, 3, 1)
+            eval(scattered)
+            return scattered
         }
-        x = x.transposed(0, 2, 3, 1)
-        eval(x)
         timings["scatter"] = ProcessInfo.processInfo.systemUptime - t0
 
         if verbose {
@@ -682,7 +635,9 @@ public final class Flux2Pipeline {
         try ensureVAE()
         reportMemory("pre-decode")
         t0 = ProcessInfo.processInfo.systemUptime
-        let decoded = try decodeMaybeTiled(x)
+        let decoded = try Flux2Signpost.measure("VAEDecode") {
+            try decodeMaybeTiled(x)
+        }
         eval(decoded)
         timings["vae_decode"] = ProcessInfo.processInfo.systemUptime - t0
 
@@ -691,7 +646,9 @@ public final class Flux2Pipeline {
         }
 
         t0 = ProcessInfo.processInfo.systemUptime
-        let result = try arrayToCGImage(decoded[0])
+        let result = try Flux2Signpost.measure("ImageConversion") {
+            try arrayToCGImage(decoded[0])
+        }
         timings["to_image"] = ProcessInfo.processInfo.systemUptime - t0
 
         // 2026-07-26 EDT | PERMANENT — symmetric staged residency: free VAE after decode
