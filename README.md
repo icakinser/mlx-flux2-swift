@@ -1,6 +1,6 @@
 # mlx-flux2-swift
 
-A native **Swift + MLX** port of **FLUX.2 [klein] 4B** for Apple Silicon.
+A native **Swift + MLX** port of **FLUX.2 [klein] 4B** and **[dev] 9B** for Apple Silicon.
 
 Runs text-to-image and image-to-image entirely on-device via
 [`mlx-swift`](https://github.com/ml-explore/mlx-swift), with no Python runtime.
@@ -348,6 +348,26 @@ The `Flux2Pipeline` init exposes `residency: .keepResident | .unloadAfterUse`, `
 text encoder, transformer, **and VAE** are freed after their stages. (Quantization skips the small
 `adaLN` modulation layers — the standard FLUX recipe — and the transformer/text-encoder big matmuls
 carry the savings.)
+
+### 9B model support
+
+FLUX.2 [dev] 9B diffusers checkpoints are supported via the sharded-weight loader. Point `FLUX2_REPO`
+or `--repo` at a 9B snapshot (e.g. `black-forest-labs/FLUX.2-dev-9B`) and the pipeline will detect
+the index JSON and load shards automatically:
+
+```sh
+export FLUX2_REPO=/path/to/FLUX.2-dev-9B
+swift run -c release flux2kit-cli -p "a red bicycle" -w 512 -H 512 -t 4 --output out.png
+```
+
+Because the 9B model is larger, use `--low-memory` or explicit quantization to fit on consumer hardware:
+
+```sh
+# 9B with int4 quantization + staged residency (~5–7 GB peak depending on image size)
+flux2kit-cli -p "…" --low-memory --output out.png
+```
+
+Note: The 9B model requires more VRAM and compute. Expect longer generation times and higher memory usage compared to the 4B model.
 
 ## Performance and quality gates
 

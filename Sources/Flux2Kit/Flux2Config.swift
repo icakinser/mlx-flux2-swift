@@ -319,13 +319,19 @@ package func loadQwen3Config(_ path: URL) throws -> Qwen3Config {
 
 // MARK: - Defaults
 
-/// DEFAULT_REPO_ID
+/// DEFAULT_REPO_ID — 4B model (default)
 public let defaultRepoId = "black-forest-labs/FLUX.2-klein-4B"
-/// WEIGHT_FILES (probe order matters)
+/// DEFAULT_REPO_ID_9B — 9B model (opt-in via --repo or FLUX2_REPO)
+public let defaultRepoId9B = "black-forest-labs/FLUX.2-dev-9B"
+/// WEIGHT_FILES (probe order matters) — 4B native weights
 package let weightFiles: [String] = [
     "flux-2-klein-4b-fp8.safetensors",
     "flux-2-klein-4b.safetensors",
     "flux-2-klein-base-4b.safetensors",
+]
+/// WEIGHT_FILES_9B — 9B diffusers sharded format
+package let weightFiles9B: [String] = [
+    "diffusion_pytorch_model.safetensors.index.json",
 ]
 /// TOKENIZER_FALLBACK_DIR
 package let tokenizerFallbackDir = "FLUX.2-klein-base-4B"

@@ -219,7 +219,8 @@ public final class Flux2Pipeline: @unchecked Sendable {
         setDtype(m, dtype)
         // PE dtype matches model dtype unless safe_attn keeps fp32
         m.peEmbedder.outputDtype = safeAttn ? nil : dtype
-        // Transformer weights: native single-file fast path, else diffusers conversion
+        
+        // Transformer weights: native single-file fast path for 4B, else diffusers conversion
         var modelWeight: URL?
         for weightFile in weightFiles {
             let candidate = repoPath.appendingPathComponent(weightFile)
@@ -228,7 +229,9 @@ public final class Flux2Pipeline: @unchecked Sendable {
                 break
             }
         }
+        
         if let modelWeight {
+            // Native 4B weights found — direct load
             try alignAndLoad(m, try loadSafetensors([modelWeight]), strict: true)
         } else {
             // Sharded diffusers format (e.g. 9B model with index json), then single file fallback
