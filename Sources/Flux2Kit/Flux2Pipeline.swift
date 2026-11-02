@@ -26,17 +26,7 @@ private func isFloatingPoint(_ dtype: DType) -> Bool {
     }
 }
 
-/// Orchestrates the FLUX.2 text-encoder → transformer → VAE stages, including staged residency.
-///
-/// - Important: `Flux2Pipeline` is **not** safe for concurrent generation. Seeded reproducibility
-///   relies on the process-global MLX RNG (`MLXRandom.seed` / `MLXRandom.normal`), and staged
-///   residency mutates shared `model`/`vae`/`textEncoder` storage. Two overlapping `generate*`
-///   calls would race on both. All public generation entry points serialize on `generationLock`
-///   (a recursive lock, since `generateImg2Img` at full strength re-enters `generate`), which makes
-///   concurrent calls safe by running them one at a time. For real parallelism, use separate
-///   processes rather than shared instances.
-/// Ergonomic bundle of text-to-image parameters for `Flux2Pipeline.generate(_:inputImages:)`. Lets
-/// callers set only the fields they care about instead of threading a long positional argument list.
+/// Progress reported after each denoise step.
 public struct GenerationProgress: Sendable {
     public let step: Int
     public let totalSteps: Int
@@ -59,6 +49,8 @@ public struct GenerationProgress: Sendable {
     }
 }
 
+/// Ergonomic bundle of text-to-image parameters for `Flux2Pipeline.generate(_:inputImages:)`. Lets
+/// callers set only the fields they care about instead of threading a long positional argument list.
 public struct GenerationOptions: Sendable {
     public var prompt: String
     public var width: Int
@@ -105,6 +97,15 @@ public struct GenerationOptions: Sendable {
     }
 }
 
+/// Orchestrates the FLUX.2 text-encoder → transformer → VAE stages, including staged residency.
+///
+/// - Important: `Flux2Pipeline` is **not** safe for concurrent generation. Seeded reproducibility
+///   relies on the process-global MLX RNG (`MLXRandom.seed` / `MLXRandom.normal`), and staged
+///   residency mutates shared `model`/`vae`/`textEncoder` storage. Two overlapping `generate*`
+///   calls would race on both. All public generation entry points serialize on `generationLock`
+///   (a recursive lock, since `generateImg2Img` at full strength re-enters `generate`), which makes
+///   concurrent calls safe by running them one at a time. For real parallelism, use separate
+///   processes rather than shared instances.
 public final class Flux2Pipeline: @unchecked Sendable {
 
     /// Serializes generation so concurrent callers cannot corrupt the global RNG or the residency
@@ -142,7 +143,6 @@ public final class Flux2Pipeline: @unchecked Sendable {
     private let qwenCfg: Qwen3Config
     private let tokenizer: Qwen3Tokenizer
 
-    private var cachedEmptyCtx: MLXArray?
 
     /// `compile` enables quality-gated `mx.compile` forward closures. It remains opt-in because
     /// release-build benefit and low-precision numerical ordering vary by MLX version and workload.
@@ -190,7 +190,10 @@ public final class Flux2Pipeline: @unchecked Sendable {
         {
             distilled = (json["is_distilled"] as? Bool) ?? false
         } else {
-            distilled = !repoId.lowercased().contains("base")
+            // No model_index.json: infer from the name. Prefer the explicit local path (the CLI passes
+            // a path and leaves repoId at the 4B default), else the repo id.
+            let nameHint = repoPath != nil ? self.repoPath.path : repoId
+            distilled = !nameHint.lowercased().contains("base")
         }
         self.isDistilled = distilled
 
@@ -288,7 +291,7 @@ public final class Flux2Pipeline: @unchecked Sendable {
         var teDir = repoPath.appendingPathComponent("text_encoder")
         var shardPaths = listSafetensors(teDir)
         if shardPaths.isEmpty {
-            // Base-repo fallback
+            // Base-repo fallback (4B family only: a mismatched encoder fails the strict load below)
             if let baseSnapshot = try? resolveRepoPath("black-forest-labs/FLUX.2-klein-4B", nil) {
                 teDir = baseSnapshot.appendingPathComponent("text_encoder")
                 shardPaths = listSafetensors(teDir)
@@ -358,10 +361,6 @@ public final class Flux2Pipeline: @unchecked Sendable {
         defer { generationLock.unlock() }
         if residency == .unloadAfterUse {
             textEncoder = nil
-            // The CFG empty-context is derived from this encoder instance; drop it so a later
-            // reload (possibly at a different dtype/quantization) re-encodes rather than reusing a
-            // stale tensor.
-            cachedEmptyCtx = nil
             MLX.Memory.clearCache()
         }
     }
@@ -409,34 +408,25 @@ public final class Flux2Pipeline: @unchecked Sendable {
         return (ctx, timings)
     }
 
-    // Encode a prompt into its final context tensor, handling CFG empty-context caching.
+    // Encode a prompt into its final context tensor (CFG paths get an (empty, prompt) batch).
     package func encodePrompt(
         _ prompt: String, guidanceDistilled: Bool, verbose: Bool = false
     ) throws -> (MLXArray, MLXArray, [String: Double]?) {
         var allTimings: [String: Double] = [:]
 
-        var ctx: MLXArray
+        let ctx: MLXArray
         if guidanceDistilled {
             let (encoded, timings) = try encodeText([prompt], verbose: verbose)
             ctx = encoded
             allTimings.merge(timings) { _, new in new }
         } else {
-            var ctxPrompt: MLXArray
-            if cachedEmptyCtx == nil {
-                let (both, timings) = try encodeText(["", prompt], verbose: verbose)
-                allTimings.merge(timings) { _, new in new }
-                eval(both)
-                cachedEmptyCtx = both[..<1]
-                ctxPrompt = both[1...]
-            } else {
-                let (encoded, timings) = try encodeText([prompt], verbose: verbose)
-                ctxPrompt = encoded
-                allTimings.merge(timings) { _, new in new }
-            }
-            guard let cachedEmptyCtx else {
-                throw Flux2Error.generationFailed("CFG empty-context cache unexpectedly nil")
-            }
-            ctx = concatenated([cachedEmptyCtx, ctxPrompt], axis: 0)
+            // Encode the empty (unconditional) and real prompt in one batch every time so both rows
+            // share the same padded length. Caching the empty context from an earlier batch broke
+            // when a later prompt padded to a different length (concatenate shape mismatch), and
+            // made results depend on which prompt ran first.
+            let (both, timings) = try encodeText(["", prompt], verbose: verbose)
+            allTimings.merge(timings) { _, new in new }
+            ctx = both
         }
 
         let t0 = ProcessInfo.processInfo.systemUptime
@@ -545,65 +535,73 @@ public final class Flux2Pipeline: @unchecked Sendable {
             }
         }
 
-        unloadTextEncoder()
-        try ensureTransformer()
-        let model = try requireTransformer()
-        reportMemory("pre-denoise")
-        t0 = ProcessInfo.processInfo.systemUptime
-        let batchSize = 1
-        let latentChannels = model.inChannels
-        let noise = MLXRandom.normal(
-            [batchSize, latentChannels, height / 16, width / 16], dtype: dtype)
-        var (x, xIds) = batchedPrcImg(noise)
-        if verbose { eval(x, xIds) }
-        timings["noise_init"] = ProcessInfo.processInfo.systemUptime - t0
+        var x: MLXArray
+        let xIds: MLXArray
+        // Scoped so the local transformer reference ends before VAE decode, letting
+        // `.unloadAfterUse` actually free it (a function-scope `let` kept it alive).
+        do {
+            unloadTextEncoder()
+            try ensureTransformer()
+            let model = try requireTransformer()
+            reportMemory("pre-denoise")
+            t0 = ProcessInfo.processInfo.systemUptime
+            let batchSize = 1
+            let latentChannels = model.inChannels
+            let noise = MLXRandom.normal(
+                [batchSize, latentChannels, height / 16, width / 16], dtype: dtype)
+            let tokenized = batchedPrcImg(noise)
+            x = tokenized.0
+            xIds = tokenized.1
+            if verbose { eval(x, xIds) }
+            timings["noise_init"] = ProcessInfo.processInfo.systemUptime - t0
 
-        let timesteps = getSchedule(numSteps, x.dim(1))
-        if verbose {
-            print(String(format: "[%7.1fms] Noise init: %d latent tokens",
-                         (timings["noise_init"] ?? 0) * 1000, x.dim(1)))
-        }
+            let timesteps = getSchedule(numSteps, x.dim(1))
+            if verbose {
+                print(String(format: "[%7.1fms] Noise init: %d latent tokens",
+                             (timings["noise_init"] ?? 0) * 1000, x.dim(1)))
+            }
 
-        t0 = ProcessInfo.processInfo.systemUptime
-        var imgInputIds = xIds
-        if let imgCondSeqIds {
-            imgInputIds = concatenated([xIds, imgCondSeqIds], axis: 1)
-        }
-        if !guidanceDistilled {
-            imgInputIds = concatenated([imgInputIds, imgInputIds], axis: 0)
-        }
-        let (peX, peCtx) = Flux2Signpost.measure("PositionEmbeddings") {
-            (model.peEmbedder(imgInputIds), model.peEmbedder(ctxIds))
-        }
-        if verbose { eval(peX, peCtx) }
-        timings["pe_embed"] = ProcessInfo.processInfo.systemUptime - t0
+            t0 = ProcessInfo.processInfo.systemUptime
+            var imgInputIds = xIds
+            if let imgCondSeqIds {
+                imgInputIds = concatenated([xIds, imgCondSeqIds], axis: 1)
+            }
+            if !guidanceDistilled {
+                imgInputIds = concatenated([imgInputIds, imgInputIds], axis: 0)
+            }
+            let (peX, peCtx) = Flux2Signpost.measure("PositionEmbeddings") {
+                (model.peEmbedder(imgInputIds), model.peEmbedder(ctxIds))
+            }
+            if verbose { eval(peX, peCtx) }
+            timings["pe_embed"] = ProcessInfo.processInfo.systemUptime - t0
 
-        if verbose {
-            print(String(format: "[%7.1fms] Position embeddings", (timings["pe_embed"] ?? 0) * 1000))
-        }
+            if verbose {
+                print(String(format: "[%7.1fms] Position embeddings", (timings["pe_embed"] ?? 0) * 1000))
+            }
 
-        t0 = ProcessInfo.processInfo.systemUptime
-        x = try executeDenoise(
-            model: model,
-            request: DenoiseRequest(
-                image: x,
-                imageIds: xIds,
-                text: ctx,
-                textIds: ctxIds,
-                timesteps: timesteps,
-                guidance: guidance,
-                guidanceDistilled: guidanceDistilled,
-                imageCondition: imgCondSeq,
-                imageConditionIds: imgCondSeqIds,
-                positionImage: peX,
-                positionText: peCtx),
-            options: DenoiseExecutionOptions(
-                sampler: sampler,
-                guidanceSchedule: guidanceSchedule,
-                evalFrequency: evalFreq,
-                verbose: verbose,
-                progress: progress,
-                cancellation: cancellation))
+            t0 = ProcessInfo.processInfo.systemUptime
+            x = try executeDenoise(
+                model: model,
+                request: DenoiseRequest(
+                    image: x,
+                    imageIds: xIds,
+                    text: ctx,
+                    textIds: ctxIds,
+                    timesteps: timesteps,
+                    guidance: guidance,
+                    guidanceDistilled: guidanceDistilled,
+                    imageCondition: imgCondSeq,
+                    imageConditionIds: imgCondSeqIds,
+                    positionImage: peX,
+                    positionText: peCtx),
+                options: DenoiseExecutionOptions(
+                    sampler: sampler,
+                    guidanceSchedule: guidanceSchedule,
+                    evalFrequency: evalFreq,
+                    verbose: verbose,
+                    progress: progress,
+                    cancellation: cancellation))
+        }
         if cancellation?.isCancelled == true { throw Flux2Error.cancelled }
         timings["denoise"] = ProcessInfo.processInfo.systemUptime - t0
 

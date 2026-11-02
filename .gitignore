@@ -1,4 +1,3 @@
-```
 # Build artifacts
 build/
 dist/
@@ -75,4 +74,8 @@ htmlcov/
 *.tar.bz2
 *.tar.xz
 *.tar.zst
-```
+
+# SwiftPM / Xcode
+.build/
+.swiftpm/
+.xcode-metallib/

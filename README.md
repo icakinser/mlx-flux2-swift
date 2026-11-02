@@ -351,12 +351,12 @@ carry the savings.)
 
 ### 9B model support
 
-FLUX.2 [dev] 9B diffusers checkpoints are supported via the sharded-weight loader. Point `FLUX2_REPO`
-or `--repo` at a 9B snapshot (e.g. `black-forest-labs/FLUX.2-dev-9B`) and the pipeline will detect
+FLUX.2 [klein] 9B diffusers checkpoints are supported via the sharded-weight loader. Point `FLUX2_REPO`
+or `--repo` at a 9B snapshot (e.g. `black-forest-labs/FLUX.2-klein-9B`) and the pipeline will detect
 the index JSON and load shards automatically:
 
 ```sh
-export FLUX2_REPO=/path/to/FLUX.2-dev-9B
+export FLUX2_REPO=/path/to/FLUX.2-klein-9B
 swift run -c release flux2kit-cli -p "a red bicycle" -w 512 -H 512 -t 4 --output out.png
 ```
 

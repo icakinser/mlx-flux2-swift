@@ -21,6 +21,10 @@ jobs:
       run: swift package dump-package >/dev/null
     - name: Build release products
       run: swift build -c release
+    - name: Build tests and stage MLX metallib
+      run: |
+        swift build --build-tests
+        DEVELOPER_DIR="$(xcode-select -p)" Scripts/setup_metallib.sh
     - name: Run unit and MLX tests
       env:
         FLUX2_RUN_MLX_TESTS: "1"

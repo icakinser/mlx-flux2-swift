@@ -23,6 +23,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        # Full history so the golden-review step can find the merge base with the PR's base branch.
+        fetch-depth: 0
     - name: Cache SwiftPM
       uses: actions/cache@v4
       with:
@@ -32,6 +35,13 @@ jobs:
           ${{ runner.os }}-spm-
     - name: Build
       run: swift build -v
+    - name: Build tests
+      run: swift build --build-tests
+    - name: Stage MLX metallib
+      # `swift build` never compiles MLX's Metal shaders, and MLX looks for the metallib when it
+      # sets up its streams even for CPU-pinned tests. Generate it with xcodebuild and stage it
+      # next to the debug products and the test bundle.
+      run: DEVELOPER_DIR="$(xcode-select -p)" Scripts/setup_metallib.sh
     - name: Run tests
       # FLUX2_RUN_MLX_TESTS enables the CPU-pinned MLX math tests (schedule, blend, color, mask,
       # quant filter). They bind their ops to Device(.cpu), so they need no Metal shader library and
@@ -45,7 +55,7 @@ jobs:
     - name: Require golden review for weight-loader changes
       if: github.event_name == 'pull_request'
       run: |
-        git fetch origin "$GITHUB_BASE_REF" --depth=1
+        git fetch origin "$GITHUB_BASE_REF"
         changed="$(git diff --name-only "origin/$GITHUB_BASE_REF"...HEAD)"
         weight_loader_changed=false
         golden_changed=false

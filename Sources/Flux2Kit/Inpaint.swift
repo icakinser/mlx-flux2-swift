@@ -64,7 +64,9 @@ extension Flux2Pipeline {
             let latents = try vae.encode(expandedDimensions(sourceArray, axis: 0)).asType(dtype)
             let decoded = try decodeMaybeTiled(latents)
             eval(decoded)
-            return try arrayToCGImage(decoded[0])
+            let image = try arrayToCGImage(decoded[0])
+            unloadVAE()  // honor .unloadAfterUse like the full path does
+            return image
         }
 
         if let seed {
@@ -134,34 +136,38 @@ extension Flux2Pipeline {
             imgInputIds = concatenated([imgInputIds, imgInputIds], axis: 0)
         }
         unloadTextEncoder()
-        try ensureTransformer()
-        let model = try requireTransformer()
-        reportMemory("pre-denoise")
-        let peX = model.peEmbedder(imgInputIds)
-        let peCtx = model.peEmbedder(ctxIds)
+        // Scoped so the local transformer reference ends before VAE decode, letting
+        // `.unloadAfterUse` actually free it (a function-scope `let` kept it alive).
+        do {
+            try ensureTransformer()
+            let model = try requireTransformer()
+            reportMemory("pre-denoise")
+            let peX = model.peEmbedder(imgInputIds)
+            let peCtx = model.peEmbedder(ctxIds)
 
-        x = try executeDenoise(
-            model: model,
-            request: DenoiseRequest(
-                image: x,
-                imageIds: xIds,
-                text: ctx,
-                textIds: ctxIds,
-                timesteps: timesteps,
-                guidance: guidance,
-                guidanceDistilled: guidanceDistilled,
-                imageCondition: imgCondSeq,
-                imageConditionIds: imgCondSeqIds,
-                positionImage: peX,
-                positionText: peCtx,
-                postStep: blend),
-            options: DenoiseExecutionOptions(
-                sampler: sampler,
-                guidanceSchedule: guidanceSchedule,
-                evalFrequency: evalFreq,
-                verbose: verbose,
-                progress: progress,
-                cancellation: cancellation))
+            x = try executeDenoise(
+                model: model,
+                request: DenoiseRequest(
+                    image: x,
+                    imageIds: xIds,
+                    text: ctx,
+                    textIds: ctxIds,
+                    timesteps: timesteps,
+                    guidance: guidance,
+                    guidanceDistilled: guidanceDistilled,
+                    imageCondition: imgCondSeq,
+                    imageConditionIds: imgCondSeqIds,
+                    positionImage: peX,
+                    positionText: peCtx,
+                    postStep: blend),
+                options: DenoiseExecutionOptions(
+                    sampler: sampler,
+                    guidanceSchedule: guidanceSchedule,
+                    evalFrequency: evalFreq,
+                    verbose: verbose,
+                    progress: progress,
+                    cancellation: cancellation))
+        }
         if cancellation?.isCancelled == true { throw Flux2Error.cancelled }
 
         return try scatterAndDecodeToImage(x, xIds: xIds)
