@@ -32,6 +32,13 @@ jobs:
           ${{ runner.os }}-spm-
     - name: Build
       run: swift build -v
+    - name: Build tests
+      run: swift build --build-tests
+    - name: Stage MLX metallib
+      # `swift build` never compiles MLX's Metal shaders, and MLX looks for the metallib when it
+      # sets up its streams even for CPU-pinned tests. Generate it with xcodebuild and stage it
+      # next to the debug products and the test bundle.
+      run: DEVELOPER_DIR="$(xcode-select -p)" Scripts/setup_metallib.sh
     - name: Run tests
       # FLUX2_RUN_MLX_TESTS enables the CPU-pinned MLX math tests (schedule, blend, color, mask,
       # quant filter). They bind their ops to Device(.cpu), so they need no Metal shader library and

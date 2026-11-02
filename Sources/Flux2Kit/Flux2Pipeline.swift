@@ -142,7 +142,6 @@ public final class Flux2Pipeline: @unchecked Sendable {
     private let qwenCfg: Qwen3Config
     private let tokenizer: Qwen3Tokenizer
 
-    private var cachedEmptyCtx: MLXArray?
 
     /// `compile` enables quality-gated `mx.compile` forward closures. It remains opt-in because
     /// release-build benefit and low-precision numerical ordering vary by MLX version and workload.
@@ -358,10 +357,6 @@ public final class Flux2Pipeline: @unchecked Sendable {
         defer { generationLock.unlock() }
         if residency == .unloadAfterUse {
             textEncoder = nil
-            // The CFG empty-context is derived from this encoder instance; drop it so a later
-            // reload (possibly at a different dtype/quantization) re-encodes rather than reusing a
-            // stale tensor.
-            cachedEmptyCtx = nil
             MLX.Memory.clearCache()
         }
     }
@@ -409,34 +404,25 @@ public final class Flux2Pipeline: @unchecked Sendable {
         return (ctx, timings)
     }
 
-    // Encode a prompt into its final context tensor, handling CFG empty-context caching.
+    // Encode a prompt into its final context tensor (CFG paths get an (empty, prompt) batch).
     package func encodePrompt(
         _ prompt: String, guidanceDistilled: Bool, verbose: Bool = false
     ) throws -> (MLXArray, MLXArray, [String: Double]?) {
         var allTimings: [String: Double] = [:]
 
-        var ctx: MLXArray
+        let ctx: MLXArray
         if guidanceDistilled {
             let (encoded, timings) = try encodeText([prompt], verbose: verbose)
             ctx = encoded
             allTimings.merge(timings) { _, new in new }
         } else {
-            var ctxPrompt: MLXArray
-            if cachedEmptyCtx == nil {
-                let (both, timings) = try encodeText(["", prompt], verbose: verbose)
-                allTimings.merge(timings) { _, new in new }
-                eval(both)
-                cachedEmptyCtx = both[..<1]
-                ctxPrompt = both[1...]
-            } else {
-                let (encoded, timings) = try encodeText([prompt], verbose: verbose)
-                ctxPrompt = encoded
-                allTimings.merge(timings) { _, new in new }
-            }
-            guard let cachedEmptyCtx else {
-                throw Flux2Error.generationFailed("CFG empty-context cache unexpectedly nil")
-            }
-            ctx = concatenated([cachedEmptyCtx, ctxPrompt], axis: 0)
+            // Encode the empty (unconditional) and real prompt in one batch every time so both rows
+            // share the same padded length. Caching the empty context from an earlier batch broke
+            // when a later prompt padded to a different length (concatenate shape mismatch), and
+            // made results depend on which prompt ran first.
+            let (both, timings) = try encodeText(["", prompt], verbose: verbose)
+            allTimings.merge(timings) { _, new in new }
+            ctx = both
         }
 
         let t0 = ProcessInfo.processInfo.systemUptime
