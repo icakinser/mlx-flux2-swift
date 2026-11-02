@@ -44,6 +44,7 @@ struct Flux2KitCLI {
         var repo = ProcessInfo.processInfo.environment["FLUX2_REPO"] ?? "./Models/FLUX-2"
         var inputs: [String] = []
         var quantize: String?
+        var quantizeSet = false  // distinguishes an explicit `-q none` from "not given"
         var dtype = defaultDtype
         var vaeFp16 = false
         var safeAttn = false
@@ -129,6 +130,7 @@ struct Flux2KitCLI {
             case "-q", "--quantize":
                 let q = next(arg)
                 quantize = (q == "none") ? nil : q
+                quantizeSet = true
             case "--dtype": dtype = next(arg) ?? dtype
             case "--vae-fp16": vaeFp16 = true
             case "--safe-attn": safeAttn = true
@@ -188,6 +190,7 @@ struct Flux2KitCLI {
                         fail("--seeds: invalid seed value '\(entry)'")
                     }
                 }
+                guard !parsed.isEmpty else { fail("--seeds needs at least one seed") }
                 seedsList = parsed
             case "--format": format = next(arg) ?? format
             case "--upscale": upscale = intArg()
@@ -300,7 +303,7 @@ struct Flux2KitCLI {
         // enabled (it is lossy — FLUX's VAE has global attention); opt in with --vae-tile.
         if lowMemory {
             residency = .unloadAfterUse
-            if quantize == nil { quantize = "int4" }
+            if !quantizeSet { quantize = "int4" }
             vaeFp16 = true
             if cacheLimitMB == nil { cacheLimitMB = 512 }
         }
@@ -461,19 +464,19 @@ struct Flux2KitCLI {
             seeds = seedsList.map { Optional($0) }
         } else if let seed {
             // Explicit base seed: derive a contiguous run.
-            seeds = (0 ..< numImages).map { Optional(seed + UInt64($0)) }
+            // Wrapping add: a base near UInt64.max must not trap.
+            seeds = (0 ..< numImages).map { Optional(seed &+ UInt64($0)) }
         } else {
             // No seed supplied: draw a fresh random base so each unseeded run is independent,
             // then surface it so the result is reproducible by re-passing -s.
+            // Always printed (not only with -v): otherwise an unseeded result can't be reproduced.
             let base = UInt64.random(in: 0 ... UInt64.max)
-            if verbose {
-                if numImages > 1 {
-                    print("Using random base seed: \(base) (seeds \(base)...\(base + UInt64(numImages - 1)))")
-                } else {
-                    print("Using seed: \(base)")
-                }
+            if numImages > 1 {
+                print("Using random base seed: \(base) (seeds \(base)...\(base &+ UInt64(numImages - 1)))")
+            } else {
+                print("Using seed: \(base)")
             }
-            seeds = (0 ..< numImages).map { Optional(base + UInt64($0)) }
+            seeds = (0 ..< numImages).map { Optional(base &+ UInt64($0)) }
         }
 
         do {

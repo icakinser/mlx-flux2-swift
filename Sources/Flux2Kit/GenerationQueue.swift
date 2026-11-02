@@ -115,26 +115,42 @@ public final class GenerationQueue: @unchecked Sendable {
     /// Terminal job IDs in the order they finished, so history trimming drops the oldest first.
     private var terminalOrder: [JobID] = []
     
-    /// Maximum number of jobs to keep in history (completed/failed)
-    public var maxHistorySize: Int = 100
-    
-    /// Callbacks for job events
-    public var onProgress: JobProgressHandler?
-    public var onCompletion: JobCompletionHandler?
-    public var onStatusChange: JobStatusHandler?
+    private var _maxHistorySize: Int = 100
+    private var _onProgress: JobProgressHandler?
+    private var _onCompletion: JobCompletionHandler?
+    private var _onStatusChange: JobStatusHandler?
+
+    /// Maximum number of finished (completed/failed/cancelled) jobs whose status is retained.
+    public var maxHistorySize: Int {
+        get { lock.withLock { _maxHistorySize } }
+        set { lock.withLock { _maxHistorySize = newValue } }
+    }
+
+    /// Callbacks for job events. They are invoked on the queue's worker thread (or the caller's
+    /// thread for enqueue/cancel notifications), never while the queue's lock is held.
+    public var onProgress: JobProgressHandler? {
+        get { lock.withLock { _onProgress } }
+        set { lock.withLock { _onProgress = newValue } }
+    }
+    public var onCompletion: JobCompletionHandler? {
+        get { lock.withLock { _onCompletion } }
+        set { lock.withLock { _onCompletion = newValue } }
+    }
+    public var onStatusChange: JobStatusHandler? {
+        get { lock.withLock { _onStatusChange } }
+        set { lock.withLock { _onStatusChange = newValue } }
+    }
     
     /// The underlying pipeline used for generation
     private let pipeline: Flux2Pipeline
     
-    /// Background task for processing jobs
-    private var processingTask: Task<Void, Never>?
+    /// Dedicated serial queue for the blocking generation calls, so a long generation does not
+    /// tie up a thread from Swift concurrency's cooperative pool.
+    private let workQueue = DispatchQueue(
+        label: "com.flux2kit.generation-queue", qos: .userInitiated)
     
     public init(pipeline: Flux2Pipeline) {
         self.pipeline = pipeline
-    }
-    
-    deinit {
-        processingTask?.cancel()
     }
     
     // MARK: - Public API
@@ -222,9 +238,14 @@ public final class GenerationQueue: @unchecked Sendable {
     /// - Parameter jobId: The job to check
     /// - Returns: Current job status
     public func status(of jobId: JobID) -> JobStatus {
-        lock.withLock {
-            return jobStatuses[jobId] ?? .cancelled
-        }
+        statusIfTracked(of: jobId) ?? .cancelled
+    }
+
+    /// The job's status, or `nil` when the queue never saw the ID or has already dropped it from
+    /// history (see `maxHistorySize`). Unlike `status(of:)`, this distinguishes "evicted" from
+    /// "cancelled".
+    public func statusIfTracked(of jobId: JobID) -> JobStatus? {
+        lock.withLock { jobStatuses[jobId] }
     }
     
     /// Get all pending jobs
@@ -261,16 +282,16 @@ public final class GenerationQueue: @unchecked Sendable {
         guard !isProcessing else { return }
         
         isProcessing = true
-        processingTask = Task.detached { [weak self] in
-            await self?.processQueue()
+        workQueue.async { [self] in
+            processQueue()
         }
     }
     
-    private func processQueue() async {
+    private func processQueue() {
         while let next = dequeueNextJob() {
             let (job, jobCancellation) = next
             notifyStatusChange(job.id, .running(progress: nil))
-            await executeJob(job, cancellation: jobCancellation)
+            executeJob(job, cancellation: jobCancellation)
             lock.withLock {
                 runningJobId = nil
                 runningCancellation = nil
@@ -297,12 +318,12 @@ public final class GenerationQueue: @unchecked Sendable {
         }
     }
     
-    private func executeJob(_ job: QueuedGenerationJob, cancellation jobCancellation: GenerationCancellation) async {
+    private func executeJob(_ job: QueuedGenerationJob, cancellation jobCancellation: GenerationCancellation) {
         let startTime = Date()
         
         do {
             // Check if cancelled before starting
-            if Task.isCancelled || jobCancellation.isCancelled {
+            if jobCancellation.isCancelled {
                 throw Flux2Error.cancelled
             }
             
@@ -387,7 +408,7 @@ public final class GenerationQueue: @unchecked Sendable {
     /// Drop the oldest terminal jobs beyond `maxHistorySize` (oldest = finished first).
     private func cleanupHistory() {
         lock.withLock {
-            let overflow = terminalOrder.count - max(0, maxHistorySize)
+            let overflow = terminalOrder.count - max(0, _maxHistorySize)
             guard overflow > 0 else { return }
             for jobId in terminalOrder.prefix(overflow) {
                 jobStatuses.removeValue(forKey: jobId)
@@ -427,7 +448,11 @@ extension GenerationQueue {
         while Date().timeIntervalSince(startTime) < timeout {
             try Task.checkCancellation()
             
-            switch status(of: jobId) {
+            guard let status = statusIfTracked(of: jobId) else {
+                throw Flux2Error.generationFailed(
+                    "Job \(jobId) is not tracked (unknown ID, or evicted from history)")
+            }
+            switch status {
             case .completed(let result):
                 return result
             case .failed(let error):
