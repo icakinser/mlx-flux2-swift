@@ -23,6 +23,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        # Full history so the golden-review step can find the merge base with the PR's base branch.
+        fetch-depth: 0
     - name: Cache SwiftPM
       uses: actions/cache@v4
       with:
@@ -52,7 +55,7 @@ jobs:
     - name: Require golden review for weight-loader changes
       if: github.event_name == 'pull_request'
       run: |
-        git fetch origin "$GITHUB_BASE_REF" --depth=1
+        git fetch origin "$GITHUB_BASE_REF"
         changed="$(git diff --name-only "origin/$GITHUB_BASE_REF"...HEAD)"
         weight_loader_changed=false
         golden_changed=false
